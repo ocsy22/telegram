@@ -343,58 +343,77 @@ async def cmd_clone_messages(cmd, req_id):
         for gid, group_msgs in ordered_groups:
             try:
                 if gid:
-                    # 媒体组：无引用批量转发
-                    await client.forward_messages(
-                        target_entity,
-                        messages=group_msgs,
-                        from_peer=source_entity,
-                        drop_author=True,
-                        drop_media_captions=remove_caption,
-                    )
+                    # 媒体组：先尝试无引用转发，失败则降级为普通转发
+                    try:
+                        await client.forward_messages(
+                            target_entity,
+                            messages=group_msgs,
+                            from_peer=source_entity,
+                            drop_author=True,
+                            drop_media_captions=remove_caption,
+                        )
+                    except (ChatAdminRequiredError, ChatWriteForbiddenError):
+                        # 没有管理员权限，降级：普通转发（带来源）
+                        await client.forward_messages(
+                            target_entity,
+                            messages=group_msgs,
+                            from_peer=source_entity,
+                            drop_media_captions=remove_caption,
+                        )
                     success_count += len(group_msgs)
                     progress(req_id,
                              f"✅ 媒体组({len(group_msgs)}条) "
                              f"msg#{group_msgs[0].id}~{group_msgs[-1].id} → {target_channel}")
                 else:
                     msg = group_msgs[0]
-                    # 单条消息：无引用转发
-                    # 如果有AI润色文案，先发caption再转发（telethon forward_messages不支持直接修改caption）
-                    await client.forward_messages(
-                        target_entity,
-                        messages=[msg],
-                        from_peer=source_entity,
-                        drop_author=True,
-                        drop_media_captions=remove_caption,
-                    )
+                    # 单条消息：先尝试无引用转发，失败则降级
+                    try:
+                        await client.forward_messages(
+                            target_entity,
+                            messages=[msg],
+                            from_peer=source_entity,
+                            drop_author=True,
+                            drop_media_captions=remove_caption,
+                        )
+                    except (ChatAdminRequiredError, ChatWriteForbiddenError):
+                        # 降级：普通转发
+                        await client.forward_messages(
+                            target_entity,
+                            messages=[msg],
+                            from_peer=source_entity,
+                            drop_media_captions=remove_caption,
+                        )
                     success_count += 1
                     progress(req_id, f"✅ msg#{msg.id} → {target_channel}")
                     
             except FloodWaitError as e:
                 progress(req_id, f"⏳ 限速，等待{e.seconds}秒...")
                 await asyncio.sleep(e.seconds + 2)
-                # 重试一次
+                # 重试一次（不用drop_author，避免再次失败）
                 try:
                     if gid:
                         await client.forward_messages(
                             target_entity, messages=group_msgs,
-                            from_peer=source_entity, drop_author=True,
+                            from_peer=source_entity,
                             drop_media_captions=remove_caption)
                         success_count += len(group_msgs)
                     else:
                         msg = group_msgs[0]
                         await client.forward_messages(
                             target_entity, messages=[msg],
-                            from_peer=source_entity, drop_author=True,
+                            from_peer=source_entity,
                             drop_media_captions=remove_caption)
                         success_count += 1
                 except Exception as e2:
                     fail_count += len(group_msgs)
                     progress(req_id, f"❌ 重试失败: {e2}")
                     
-            except (ChatWriteForbiddenError, ChatAdminRequiredError):
-                send_response({"type": "error", "req_id": req_id,
-                              "error": f"没有发送权限到目标频道 {target_channel}"})
-                return
+            except (ChatWriteForbiddenError, ChatAdminRequiredError) as e:
+                # 权限错误只跳过当前条，继续处理下一条（不 return！）
+                fail_count += len(group_msgs)
+                ids_str = (f"msg#{group_msgs[0].id}" if len(group_msgs) == 1
+                           else f"msg#{group_msgs[0].id}~{group_msgs[-1].id}")
+                progress(req_id, f"⚠️ {ids_str} 无发送权限（{type(e).__name__}），跳过")
                 
             except Exception as e:
                 fail_count += len(group_msgs)

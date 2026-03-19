@@ -100,10 +100,20 @@ class TelethonService {
     if (line.isEmpty) return;
     try {
       final data = jsonDecode(line) as Map<String, dynamic>;
+      final msgType = data['type'] as String?;
       final reqId = data['req_id'] as String?;
-      if (reqId != null && _pendingReqs.containsKey(reqId)) {
+
+      // progress消息始终走eventController，不能提前结束pendingReqs
+      // 只有最终响应（非progress类型）才能完成pendingReqs中的completer
+      if (reqId != null &&
+          _pendingReqs.containsKey(reqId) &&
+          msgType != 'progress') {
+        // 最终响应：完成 pendingReqs 中的 completer
         _pendingReqs.remove(reqId)?.complete(data);
+        // 同时也广播到 eventController（让cloneMessages的stream监听收到）
+        _eventController.add(data);
       } else {
+        // progress消息或无req_id的消息都走eventController
         _eventController.add(data);
       }
     } catch (e) {
@@ -246,30 +256,20 @@ class TelethonService {
     };
 
     final completer = Completer<Map<String, dynamic>>();
-    
-    // 监听进度消息和完成消息
+
+    // ★★★ 核心修复：只用 eventController 监听 ★★★
+    // 绝对不能注册 _pendingReqs[reqId]，否则 _onOutput 收到第一条 progress 就会
+    // 调用 _pendingReqs.remove(reqId)?.complete(data) 提前终止整个克隆任务！
+    // progress 消息通过回调通知，clone_done/error 才完成 completer。
     late StreamSubscription sub;
     sub = _eventController.stream.listen((evt) {
-      if (evt['req_id'] == reqId) {
-        if (evt['type'] == 'progress') {
-          onProgress?.call(evt['msg'] as String? ?? '');
-        } else if (evt['type'] == 'clone_done' || evt['type'] == 'error') {
-          if (!completer.isCompleted) {
-            completer.complete(evt);
-            sub.cancel();
-          }
-        }
-      }
-    });
-
-    // 也监听来自_pendingReqs的响应
-    _pendingReqs[reqId] = Completer<Map<String, dynamic>>();
-    _pendingReqs[reqId]!.future.then((result) {
-      if (!completer.isCompleted) {
-        if (result['type'] == 'progress') {
-          onProgress?.call(result['msg'] as String? ?? '');
-        } else {
-          completer.complete(result);
+      if (evt['req_id'] != reqId) return;
+      final t = evt['type'] as String?;
+      if (t == 'progress') {
+        onProgress?.call(evt['msg'] as String? ?? '');
+      } else if (t == 'clone_done' || t == 'error') {
+        if (!completer.isCompleted) {
+          completer.complete(evt);
           sub.cancel();
         }
       }
@@ -280,7 +280,6 @@ class TelethonService {
       await _process!.stdin.flush();
     } catch (e) {
       sub.cancel();
-      _pendingReqs.remove(reqId);
       return {'type': 'error', 'error': '发送命令失败: $e'};
     }
 
