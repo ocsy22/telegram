@@ -67,6 +67,137 @@ class TelegramApiService {
     return result;
   }
 
+  // ======================================================================
+  // 从公开频道网页抓取消息文案（用于AI润色）
+  // ======================================================================
+  Future<Map<int, String>> getPublicChannelCaptions({
+    required String username,
+    required List<int> messageIds,
+  }) async {
+    if (messageIds.isEmpty) return {};
+    final cleanName = _cleanUsername(username);
+    final captions = <int, String>{};
+
+    // 按消息ID范围分批抓取（每次页面最多约20条）
+    final sortedIds = messageIds.toList()..sort();
+    int cursor = sortedIds.last + 5;
+    int attempts = 0;
+    const maxAttempts = 30;
+    final remaining = Set<int>.from(sortedIds);
+
+    while (remaining.isNotEmpty && attempts < maxAttempts) {
+      attempts++;
+      final html = await _fetchPublicPageHtml(cleanName, beforeId: cursor);
+      if (html.isEmpty) break;
+
+      // 提取消息ID和文案
+      final extracted = _extractCaptionsFromHtml(html, cleanName);
+      bool anyInRange = false;
+      for (final entry in extracted.entries) {
+        if (remaining.contains(entry.key)) {
+          captions[entry.key] = entry.value;
+          remaining.remove(entry.key);
+          anyInRange = true;
+        }
+      }
+
+      // 找页面中最小的ID作为下一个cursor
+      final pageIds = extracted.keys.toList()..sort();
+      if (pageIds.isEmpty) break;
+      if (pageIds.first <= sortedIds.first) break;
+      cursor = pageIds.first;
+
+      if (!anyInRange && pageIds.last < sortedIds.first) break;
+      await Future.delayed(const Duration(milliseconds: 300));
+    }
+
+    return captions;
+  }
+
+  Future<String> _fetchPublicPageHtml(String username, {int? beforeId}) async {
+    var url = 'https://t.me/s/$username';
+    if (beforeId != null) url += '?before=$beforeId';
+    final client = _client();
+    try {
+      final resp = await client.get(Uri.parse(url), headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      }).timeout(const Duration(seconds: 20));
+      if (resp.statusCode == 200) return resp.body;
+    } catch (_) {
+    } finally {
+      client.close();
+    }
+    return '';
+  }
+
+  Map<int, String> _extractCaptionsFromHtml(String html, String username) {
+    final result = <int, String>{};
+
+    // 找所有消息块
+    // 格式: <div class="tgme_widget_message_wrap..." data-post="channelname/123">...</div>
+    final msgBlockRegex = RegExp(
+      r'data-post="[^/]+/(\d+)".*?class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>',
+      dotAll: true,
+    );
+
+    for (final m in msgBlockRegex.allMatches(html)) {
+      final id = int.tryParse(m.group(1) ?? '');
+      final rawHtml = m.group(2) ?? '';
+      if (id == null) continue;
+
+      // 清理HTML标签，保留文本
+      final text = rawHtml
+          .replaceAll(RegExp(r'<br\s*/?>'), '\n')
+          .replaceAll(RegExp(r'<[^>]+>'), '')
+          .replaceAll('&amp;', '&')
+          .replaceAll('&lt;', '<')
+          .replaceAll('&gt;', '>')
+          .replaceAll('&quot;', '"')
+          .replaceAll('&#39;', "'")
+          .trim();
+
+      if (text.isNotEmpty) result[id] = text;
+    }
+
+    return result;
+  }
+
+  // ======================================================================
+  // 获取公开频道最新N条消息ID（不需要指定范围，适合"从最新开始克隆"）
+  // ======================================================================
+  Future<List<int>> getLatestPublicMsgIds({
+    required String username,
+    int count = 100,
+    void Function(String)? onLog,
+  }) async {
+    final cleanName = _cleanUsername(username);
+    final allIds = <int>{};
+    int? cursor;
+    int attempts = 0;
+    const maxAttempts = 15;
+
+    onLog?.call('🔍 获取 @$cleanName 最新 $count 条消息...');
+
+    while (attempts < maxAttempts && allIds.length < count) {
+      attempts++;
+      final msgs = await _fetchPublicPage(cleanName, beforeId: cursor);
+      if (msgs.isEmpty) break;
+      for (final id in msgs) {
+        allIds.add(id);
+        if (allIds.length >= count) break;
+      }
+      cursor = msgs.last;
+      await Future.delayed(const Duration(milliseconds: 400));
+    }
+
+    final result = allIds.toList()..sort();
+    onLog?.call('📋 获取到 ${result.length} 条最新消息ID');
+    return result;
+  }
+
+  // ======================================================================
+  // 抓取公开频道一页消息ID（从指定ID之前开始）
+  // ======================================================================
   Future<List<int>> _fetchPublicPage(String username, {int? beforeId}) async {
     var url = 'https://t.me/s/$username';
     if (beforeId != null) url += '?before=$beforeId';
