@@ -12,6 +12,7 @@ import 'package:uuid/uuid.dart';
 import '../models/app_models.dart';
 import '../services/telegram_bot_service.dart';
 import '../services/ai_service.dart';
+import '../services/telethon_service.dart';
 
 class AppProvider extends ChangeNotifier {
   static const String _accountsKey = 'tg_accounts';
@@ -36,11 +37,38 @@ class AppProvider extends ChangeNotifier {
   final List<LogEntry> _logs = [];
   List<LogEntry> get logs => List.unmodifiable(_logs);
 
+  // Telethon服务状态
+  bool _telethonReady = false;
+  bool get telethonReady => _telethonReady;
+
   // ===== 初始化 =====
   Future<void> init() async {
     await _loadAll();
     _initialized = true;
     notifyListeners();
+
+    // 非阻塞启动Telethon桥接服务（Windows桌面端）
+    if (!kIsWeb) {
+      _initTelethon();
+    }
+  }
+
+  Future<void> _initTelethon() async {
+    try {
+      final ready = await TelethonService.instance.start();
+      _telethonReady = ready;
+      if (ready) {
+        addLog('✅ MTProto桥接服务就绪（支持用户账号读取私有频道）',
+            level: LogLevel.success);
+      } else {
+        addLog('ℹ️ MTProto桥接服务未启动（需要Python+Telethon环境）\n'
+            '   用户API账号将使用Bot API降级模式',
+            level: LogLevel.info);
+      }
+      notifyListeners();
+    } catch (e) {
+      addLog('⚠️ 桥接服务启动异常: $e', level: LogLevel.warning);
+    }
   }
 
   Future<void> _loadAll() async {
@@ -177,22 +205,61 @@ class AppProvider extends ChangeNotifier {
         return false;
       }
     } else {
-      // 用户API模式：验证三要素（手机号、API ID、API Hash）是否都已填写
+      // 用户API模式
       final hasPhone = account.phone.isNotEmpty;
       final hasApiId = account.apiId.isNotEmpty;
       final hasApiHash = account.apiHash.isNotEmpty;
 
       if (hasApiId && hasApiHash) {
-        accounts[idx].status = AccountStatus.connected;
-        accounts[idx].errorMessage = null;
-        final phoneInfo = hasPhone ? '手机号 ${account.phone}' : '（未填手机号）';
-        addLog(
-          '✅ 用户API账号已配置：API ID=${account.apiId}，$phoneInfo\n'
-          '   ℹ️ 用户API账号可访问任意公开/已加入的频道历史消息',
-          level: LogLevel.success,
-        );
-        if (!hasPhone) {
-          addLog('⚠️ 建议填写手机号以便识别账号', level: LogLevel.warning);
+        // 尝试通过Telethon验证
+        if (_telethonReady) {
+          addLog('🔗 正在通过MTProto验证用户账号...', level: LogLevel.info);
+          final result = await TelethonService.instance.startClient(
+            apiId: account.apiId,
+            apiHash: account.apiHash,
+            sessionKey: account.sessionKey,
+          );
+          if (result['type'] == 'client_ready') {
+            if (result['authorized'] == true) {
+              final userInfo = result['user'] as Map<String, dynamic>?;
+              accounts[idx].status = AccountStatus.connected;
+              accounts[idx].telethonAuthorized = true;
+              accounts[idx].errorMessage = null;
+              if (userInfo != null) {
+                final username = userInfo['username'] as String? ?? '';
+                final firstName = userInfo['first_name'] as String? ?? '';
+                if (username.isNotEmpty) accounts[idx].username = username;
+                if (firstName.isNotEmpty && accounts[idx].name.startsWith('新用户')) {
+                  accounts[idx].name = firstName;
+                }
+              }
+              addLog('✅ 用户账号已通过MTProto验证：${userInfo?['first_name'] ?? account.phone}',
+                  level: LogLevel.success);
+              addLog('   ✅ 可以读取该账号加入的所有频道（公开+私有）',
+                  level: LogLevel.success);
+            } else {
+              accounts[idx].status = AccountStatus.error;
+              accounts[idx].errorMessage = '未登录，需要手机号验证码';
+              addLog('⚠️ 账号未登录，请在账号页面点击登录进行验证码登录',
+                  level: LogLevel.warning);
+              addLog('   填写手机号后点击「验证/登录」按钮', level: LogLevel.info);
+            }
+          } else {
+            accounts[idx].status = AccountStatus.error;
+            accounts[idx].errorMessage = result['error'] as String? ?? 'MTProto连接失败';
+            addLog('❌ MTProto连接失败：${result['error']}', level: LogLevel.error);
+          }
+        } else {
+          // Telethon未启动，仅配置验证
+          accounts[idx].status = AccountStatus.connected;
+          accounts[idx].errorMessage = null;
+          final phoneInfo = hasPhone ? '手机号 ${account.phone}' : '（未填手机号）';
+          addLog(
+            '✅ 用户API账号已配置：API ID=${account.apiId}，$phoneInfo\n'
+            '   ⚠️ MTProto桥接未启动，将使用Bot API降级模式（仅支持Bot已加入的频道）\n'
+            '   💡 安装Python+Telethon可解锁完整功能',
+            level: LogLevel.warning,
+          );
         }
       } else {
         accounts[idx].status = AccountStatus.error;
@@ -208,6 +275,121 @@ class AppProvider extends ChangeNotifier {
       await _saveAll();
       notifyListeners();
       return accounts[idx].status == AccountStatus.connected;
+    }
+  }
+
+  /// 用户账号手机号登录流程
+  Future<UserLoginState> startUserLogin({
+    required String accountId,
+    required String phone,
+  }) async {
+    final idx = accounts.indexWhere((a) => a.id == accountId);
+    if (idx < 0) return UserLoginState(step: 'error', error: '账号不存在');
+    final account = accounts[idx];
+
+    if (!_telethonReady) {
+      return UserLoginState(
+          step: 'error', error: 'MTProto桥接未启动，需要安装Python+Telethon');
+    }
+
+    // 先初始化客户端
+    await TelethonService.instance.startClient(
+      apiId: account.apiId,
+      apiHash: account.apiHash,
+      sessionKey: account.sessionKey,
+    );
+
+    // 发送验证码
+    final result = await TelethonService.instance.sendCode(
+      sessionKey: account.sessionKey,
+      phone: phone,
+    );
+
+    if (result['type'] == 'code_sent') {
+      accounts[idx].phone = phone;
+      await _saveAll();
+      notifyListeners();
+      return UserLoginState(
+        step: 'code_input',
+        phoneCodeHash: result['phone_code_hash'] as String? ?? '',
+        phone: phone,
+      );
+    } else {
+      return UserLoginState(
+          step: 'error', error: result['error'] as String? ?? '发送验证码失败');
+    }
+  }
+
+  Future<UserLoginState> confirmLoginCode({
+    required String accountId,
+    required String phone,
+    required String code,
+    required String phoneCodeHash,
+  }) async {
+    final idx = accounts.indexWhere((a) => a.id == accountId);
+    if (idx < 0) return UserLoginState(step: 'error', error: '账号不存在');
+    final account = accounts[idx];
+
+    final result = await TelethonService.instance.signIn(
+      sessionKey: account.sessionKey,
+      phone: phone,
+      code: code,
+      phoneCodeHash: phoneCodeHash,
+    );
+
+    if (result['type'] == 'signed_in') {
+      accounts[idx].status = AccountStatus.connected;
+      accounts[idx].telethonAuthorized = true;
+      final userInfo = result['user'] as Map<String, dynamic>?;
+      if (userInfo != null) {
+        final username = userInfo['username'] as String? ?? '';
+        final firstName = userInfo['first_name'] as String? ?? '';
+        if (username.isNotEmpty) accounts[idx].username = username;
+        if (firstName.isNotEmpty) accounts[idx].name = firstName;
+      }
+      await _saveAll();
+      notifyListeners();
+      addLog('✅ 用户账号登录成功！可以读取该账号加入的所有频道',
+          level: LogLevel.success);
+      return UserLoginState(step: 'done');
+    } else if (result['type'] == 'need_2fa') {
+      return UserLoginState(step: 'password_input');
+    } else {
+      return UserLoginState(
+          step: 'error', error: result['error'] as String? ?? '验证码错误');
+    }
+  }
+
+  Future<UserLoginState> confirmLogin2FA({
+    required String accountId,
+    required String password,
+  }) async {
+    final idx = accounts.indexWhere((a) => a.id == accountId);
+    if (idx < 0) return UserLoginState(step: 'error', error: '账号不存在');
+    final account = accounts[idx];
+
+    final result = await TelethonService.instance.signIn2FA(
+      sessionKey: account.sessionKey,
+      password: password,
+    );
+
+    if (result['type'] == 'signed_in') {
+      accounts[idx].status = AccountStatus.connected;
+      accounts[idx].telethonAuthorized = true;
+      final userInfo = result['user'] as Map<String, dynamic>?;
+      if (userInfo != null) {
+        final username = userInfo['username'] as String? ?? '';
+        final firstName = userInfo['first_name'] as String? ?? '';
+        if (username.isNotEmpty) accounts[idx].username = username;
+        if (firstName.isNotEmpty) accounts[idx].name = firstName;
+      }
+      await _saveAll();
+      notifyListeners();
+      addLog('✅ 两步验证成功，用户账号已登录', level: LogLevel.success);
+      return UserLoginState(step: 'done');
+    } else {
+      return UserLoginState(
+          step: 'error', error: result['error'] as String? ?? '密码错误');
     }
   }
 
@@ -247,32 +429,35 @@ class AppProvider extends ChangeNotifier {
     if (idx < 0) return;
     final task = tasks[idx];
 
-    // ★ 支持 Bot 和用户API两种账号
+    // 找配置的账号
     TelegramAccount? account;
-
-    // 优先找配置的账号
     if (task.sourceAccountId.isNotEmpty) {
       try {
         account = accounts.firstWhere((a) => a.id == task.sourceAccountId);
       } catch (_) {}
     }
 
-    // 如果没找到，自动选第一个 Bot 账号
+    // 如果没找到，自动选第一个已连接的账号
     if (account == null) {
       try {
-        account = accounts.firstWhere((a) =>
-            a.type == AccountType.bot && a.botToken.isNotEmpty);
+        account = accounts.firstWhere(
+            (a) => a.status == AccountStatus.connected);
+      } catch (_) {}
+    }
+    // 降级：选第一个Bot账号
+    if (account == null) {
+      try {
+        account = accounts.firstWhere(
+            (a) => a.type == AccountType.bot && a.botToken.isNotEmpty);
       } catch (_) {}
     }
 
-    // 没有账号
     if (account == null) {
       addLog('❌ 任务[${task.name}]：请先在账号管理中添加账号并选择',
           level: LogLevel.error, taskId: taskId);
       return;
     }
 
-    // Bot 账号必须有 token
     if (account.type == AccountType.bot && account.botToken.isEmpty) {
       addLog('❌ 任务[${task.name}]：Bot账号Token为空，请重新配置',
           level: LogLevel.error, taskId: taskId);
@@ -283,7 +468,8 @@ class AppProvider extends ChangeNotifier {
 
     tasks[idx].status = TaskStatus.running;
     tasks[idx].lastRunAt = DateTime.now();
-    addLog('▶️ 任务[${task.name}]已启动，账号：${account.name}',
+    final accountType = account.type == AccountType.userApi ? '[用户API]' : '[Bot]';
+    addLog('▶️ 任务[${task.name}]已启动，账号：${account.name} $accountType',
         level: LogLevel.info, taskId: taskId);
     notifyListeners();
 
@@ -318,7 +504,6 @@ class AppProvider extends ChangeNotifier {
     final content = (text ?? '') + (caption ?? '');
     if (content.isEmpty) return false;
 
-    // 自定义过滤词（每行一个，精确包含匹配）
     final customKeywords = task.adKeywords
         .split('\n')
         .map((s) => s.trim().toLowerCase())
@@ -327,17 +512,14 @@ class AppProvider extends ChangeNotifier {
 
     final lowerContent = content.toLowerCase();
 
-    // 检查自定义关键词（精确匹配）
     for (final kw in customKeywords) {
       if (lowerContent.contains(kw)) return true;
     }
 
-    // 链接/联系方式检测（高准确率广告特征）
     if (content.contains('t.me/') || content.contains('telegram.me/')) {
       return true;
     }
 
-    // 常用广告词检测
     const builtinKeywords = [
       '招募', '招收', '入群', '拉群', '邀请码',
       '限时优惠', '折扣', '秒杀', '抢购',
@@ -347,11 +529,9 @@ class AppProvider extends ChangeNotifier {
       if (content.contains(kw)) return true;
     }
 
-    // URL 检测
     final urlRegex = RegExp(r'https?://\S+', caseSensitive: false);
     if (urlRegex.hasMatch(content)) return true;
 
-    // @ 用户名检测
     final atRegex = RegExp(r'@[a-zA-Z][a-zA-Z0-9_]{4,}');
     if (atRegex.hasMatch(content)) return true;
 
@@ -365,7 +545,9 @@ class AppProvider extends ChangeNotifier {
     String? originalCaption,
   ) async {
     if (originalCaption == null || originalCaption.trim().isEmpty) return null;
-    if (!settings.aiConfig.enabled || settings.aiConfig.apiKey.isEmpty) return null;
+    // 免费服务商（Pollinations）不需要API Key也能工作
+    if (!settings.aiConfig.enabled) return null;
+    if (!settings.aiConfig.isFreeProvider && settings.aiConfig.apiKey.isEmpty) return null;
 
     // 优先使用润色（轻度修改）
     if (task.aiPolish) {
@@ -374,7 +556,9 @@ class AppProvider extends ChangeNotifier {
         originalCaption: originalCaption,
         style: style,
       );
-      if (result != null && result.isNotEmpty) return result;
+      if (result != null && result.isNotEmpty && result != originalCaption) {
+        return result;
+      }
     }
 
     // 完整改写
@@ -389,9 +573,7 @@ class AppProvider extends ChangeNotifier {
     return null;
   }
 
-  // ===== 视频MD5修改（Windows版本）=====
-  /// 下载视频并在末尾追加随机字节，改变MD5哈希值（不影响视频播放）
-  /// 注意：Bot API限制，只能获取≤20MB的文件
+  // ===== 视频MD5修改 =====
   Future<String?> modifyVideoMd5ForFile(String videoFilePath) async {
     if (kIsWeb) return null;
     try {
@@ -400,10 +582,8 @@ class AppProvider extends ChangeNotifier {
 
       final originalBytes = await file.readAsBytes();
       final rng = Random();
-      // 追加16~31个随机字节到末尾（改变MD5，对视频播放无影响）
       final extra = List<int>.generate(
-          16 + rng.nextInt(16),
-          (_) => rng.nextInt(256));
+          16 + rng.nextInt(16), (_) => rng.nextInt(256));
       final modifiedBytes = Uint8List(originalBytes.length + extra.length)
         ..setRange(0, originalBytes.length, originalBytes)
         ..setRange(originalBytes.length, originalBytes.length + extra.length, extra);
@@ -419,7 +599,6 @@ class AppProvider extends ChangeNotifier {
     }
   }
 
-  /// MD5修改辅助：创建HTTP客户端
   http.Client makeHttpClient(bool ignoreSsl) {
     if (kIsWeb) return http.Client();
     final hc = HttpClient()
@@ -427,7 +606,7 @@ class AppProvider extends ChangeNotifier {
     return http_io.IOClient(hc);
   }
 
-  // ===== 克隆任务执行（支持 media_group 批量转发）=====
+  // ===== 克隆任务执行 =====
   Future<void> _runCloneTask(
       CloneTask task, TelegramAccount account, _TaskRunner runner) async {
     final idx = tasks.indexWhere((t) => t.id == task.id);
@@ -439,37 +618,156 @@ class AppProvider extends ChangeNotifier {
         ? task.endMessageId
         : (task.cloneCount > 0 ? start + task.cloneCount - 1 : start + 99);
 
-    int processed = 0;
-    int skipped = 0;
     tasks[idx].totalCount = end - start + 1;
     tasks[idx].processedCount = 0;
 
     final sources = task.sourceChannels.isNotEmpty ? task.sourceChannels : [''];
     final targets = task.targetChannels.isNotEmpty ? task.targetChannels : [''];
 
-    // ★ 关键：先预扫描媒体组，再按组批量转发
-    // copyMessages 一次最多10条，Bot API自动保持同media_group_id的消息为一组
-    const scanBatch = 50; // 每次预扫描50条消息，检测media_group
+    // ★★★ 核心逻辑：判断是否使用Telethon（用户API账号）★★★
+    final useUserApi = account.type == AccountType.userApi &&
+        _telethonReady &&
+        account.telethonAuthorized;
 
-    addLog('▶️ 开始克隆 msg[$start..$end]，共${end - start + 1}条（自动检测媒体组）',
-        level: LogLevel.info, taskId: task.id);
+    if (useUserApi) {
+      // ===== 用户API模式：通过MTProto克隆 =====
+      addLog('▶️ 使用MTProto用户账号克隆（可访问私有频道）',
+          level: LogLevel.info, taskId: task.id);
+      await _runCloneTaskWithTelethon(task, account, runner, sources, targets, start, end, idx);
+    } else {
+      // ===== Bot API模式：通过Bot Token克隆 =====
+      final botToken = account.type == AccountType.bot
+          ? account.botToken
+          : _findBotToken(); // 用户API降级时使用任意可用Bot
 
-    // 使用分段扫描+批量发送策略
+      if (botToken == null || botToken.isEmpty) {
+        addLog(
+          '❌ 无可用Bot Token。\n'
+          '   用户API账号克隆需要：\n'
+          '   方案A：安装Python+Telethon启用MTProto模式\n'
+          '   方案B：同时添加一个Bot账号（Bot需加入源频道）',
+          level: LogLevel.error,
+          taskId: task.id,
+        );
+        tasks[idx].status = TaskStatus.failed;
+        notifyListeners();
+        return;
+      }
+
+      if (account.type == AccountType.userApi) {
+        addLog(
+          '⚠️ 用户API账号降级为Bot API模式（需要Bot已加入源频道）\n'
+          '   如需真正读取私有频道，请安装Python+Telethon',
+          level: LogLevel.warning,
+          taskId: task.id,
+        );
+      }
+
+      addLog('▶️ 开始克隆 msg[$start..$end]，共${end - start + 1}条（媒体组自动检测）',
+          level: LogLevel.info, taskId: task.id);
+
+      await _runCloneTaskWithBot(task, botToken, runner, sources, targets, start, end, idx);
+    }
+  }
+
+  /// 查找任何可用的Bot Token（用于降级模式）
+  String? _findBotToken() {
+    for (final acc in accounts) {
+      if (acc.type == AccountType.bot && acc.botToken.isNotEmpty) {
+        return acc.botToken;
+      }
+    }
+    return null;
+  }
+
+  // ===== Telethon克隆（MTProto模式）=====
+  Future<void> _runCloneTaskWithTelethon(
+    CloneTask task,
+    TelegramAccount account,
+    _TaskRunner runner,
+    List<String> sources,
+    List<String> targets,
+    int start,
+    int end,
+    int idx,
+  ) async {
+    int totalSuccess = 0;
+    int totalFailed = 0;
+
+    for (final src in sources) {
+      if (runner.cancelled) break;
+
+      final result = await TelethonService.instance.cloneMessages(
+        sessionKey: account.sessionKey,
+        sourceChannel: src,
+        targetChannels: targets,
+        startId: start,
+        endId: end,
+        count: task.cloneCount > 0 ? task.cloneCount : 1000,
+        removeCaption: task.removeCaption,
+        modifyMd5: task.modifyVideoMd5,
+        onProgress: (msg) {
+          addLog(msg, taskId: task.id,
+              level: msg.startsWith('✅') ? LogLevel.success
+                  : msg.startsWith('❌') ? LogLevel.error
+                  : msg.startsWith('⚠️') ? LogLevel.warning
+                  : LogLevel.info);
+          notifyListeners();
+        },
+      );
+
+      if (result['type'] == 'clone_done') {
+        totalSuccess += (result['success'] as int? ?? 0);
+        totalFailed += (result['failed'] as int? ?? 0);
+
+        if (idx < tasks.length) {
+          tasks[idx].processedCount = totalSuccess;
+          tasks[idx].progress = 1.0;
+        }
+      } else if (result['type'] == 'error') {
+        addLog('❌ 克隆失败: ${result['error']}',
+            level: LogLevel.error, taskId: task.id);
+      }
+    }
+
+    if (!runner.cancelled) {
+      if (idx < tasks.length) {
+        tasks[idx].status = TaskStatus.completed;
+        tasks[idx].progress = 1.0;
+      }
+      addLog('🎉 任务[${task.name}]完成！成功$totalSuccess条，失败$totalFailed条',
+          level: LogLevel.success, taskId: task.id);
+    }
+    _runners.remove(task.id);
+    await _saveAll();
+    notifyListeners();
+  }
+
+  // ===== Bot API克隆（原有逻辑）=====
+  Future<void> _runCloneTaskWithBot(
+    CloneTask task,
+    String botToken,
+    _TaskRunner runner,
+    List<String> sources,
+    List<String> targets,
+    int start,
+    int end,
+    int idx,
+  ) async {
+    int processed = 0;
+    int skipped = 0;
+    const scanBatch = 50;
+
     int msgCursor = start;
     while (msgCursor <= end && !runner.cancelled) {
       final scanEnd = min(msgCursor + scanBatch - 1, end);
       final scanIds = List.generate(scanEnd - msgCursor + 1, (i) => msgCursor + i);
 
-      // ★★★ 对于克隆模式，直接使用 copyMessages 批量转发
-      // Bot API 7.0+ 的 copyMessages 会自动识别并保持 media_group
-      // 同一 media_group_id 的消息即使在同批次中也会被合并发送
-      
       for (final src in sources) {
         if (runner.cancelled) break;
         for (final tgt in targets) {
           if (runner.cancelled) break;
-          
-          // 分批次（每批最多10条）执行 copyMessages
+
           for (int batchStart = 0; batchStart < scanIds.length; batchStart += 10) {
             if (runner.cancelled) break;
             final batchEnd = min(batchStart + 10, scanIds.length);
@@ -477,7 +775,7 @@ class AppProvider extends ChangeNotifier {
 
             try {
               final ok = await TelegramBotService.instance.copyMessages(
-                token: account.botToken,
+                token: botToken,
                 fromChatId: src,
                 toChatId: tgt,
                 messageIds: batchIds,
@@ -497,21 +795,11 @@ class AppProvider extends ChangeNotifier {
                 for (final mid in batchIds) {
                   if (runner.cancelled) break;
 
-                  String? captionText;
-                  if ((task.aiPolish || task.aiRewrite) &&
-                      settings.aiConfig.enabled &&
-                      settings.aiConfig.apiKey.isNotEmpty) {
-                    // 单条逐个处理时，caption只能用空
-                    // 因为Bot API的copyMessage不能获取原始caption
-                    captionText = null;
-                  }
-
                   final newMsgId = await TelegramBotService.instance.copyMessage(
-                    token: account.botToken,
+                    token: botToken,
                     fromChatId: src,
                     toChatId: tgt,
                     messageId: mid,
-                    caption: task.removeCaption ? '' : captionText,
                     removeCaption: task.removeCaption,
                   );
                   if (newMsgId != null) {
@@ -521,8 +809,8 @@ class AppProvider extends ChangeNotifier {
                     _addRecord(task, src, tgt, mid, 'media', false);
                   } else {
                     skipped++;
-                    if (skipped <= 20) {
-                      addLog('⚪ msg[$mid] 跳过（消息不存在/无权限）',
+                    if (skipped <= 30) {
+                      addLog('⚪ msg[$mid] 跳过（消息不存在/Bot无权限）',
                           taskId: task.id);
                     }
                   }
@@ -534,7 +822,6 @@ class AppProvider extends ChangeNotifier {
                   level: LogLevel.error, taskId: task.id);
             }
 
-            // 批次间延迟
             if (!runner.cancelled) {
               await Future.delayed(const Duration(milliseconds: 800));
             }
@@ -542,13 +829,13 @@ class AppProvider extends ChangeNotifier {
         }
       }
 
-      tasks[idx].processedCount = processed;
-      tasks[idx].progress = (scanEnd - start + 1) / max(1, end - start + 1);
+      if (idx < tasks.length) {
+        tasks[idx].processedCount = processed;
+        tasks[idx].progress = (scanEnd - start + 1) / max(1, end - start + 1);
+      }
       notifyListeners();
-
       msgCursor = scanEnd + 1;
 
-      // 段落间延迟
       if (msgCursor <= end && !runner.cancelled) {
         final delay = task.delayMin +
             Random().nextInt(max(1, task.delayMax - task.delayMin + 1));
@@ -557,8 +844,10 @@ class AppProvider extends ChangeNotifier {
     }
 
     if (!runner.cancelled) {
-      tasks[idx].status = TaskStatus.completed;
-      tasks[idx].progress = 1.0;
+      if (idx < tasks.length) {
+        tasks[idx].status = TaskStatus.completed;
+        tasks[idx].progress = 1.0;
+      }
       addLog('🎉 任务[${task.name}]完成！成功$processed条，跳过$skipped条',
           level: LogLevel.success, taskId: task.id);
     }
@@ -575,12 +864,26 @@ class AppProvider extends ChangeNotifier {
     TelegramBotService.instance.setIgnoreSsl(settings.ignoreSsl);
     final aiService = AiService(config: settings.aiConfig);
 
+    // 确定使用哪个Bot Token
+    String? botToken;
+    if (account.type == AccountType.bot) {
+      botToken = account.botToken;
+    } else {
+      botToken = _findBotToken();
+    }
+
+    if (botToken == null || botToken.isEmpty) {
+      addLog('❌ 监听模式需要Bot账号（用于接收更新）', level: LogLevel.error, taskId: task.id);
+      tasks[idx].status = TaskStatus.failed;
+      notifyListeners();
+      return;
+    }
+
     int lastUpdateId = 0;
-    // media_group 缓冲区：groupId -> List<TgMessage>
     final Map<String, List<TgMessage>> groupBuffer = {};
     final Map<String, Timer> groupTimers = {};
 
-    addLog('🔍 任务[${task.name}]开始24h监听... 每${task.monitorIntervalSec}秒轮询',
+    addLog('🔍 任务[${task.name}]开始监听... 每${task.monitorIntervalSec}秒轮询',
         taskId: task.id);
 
     Future<void> flushGroup(String groupId) async {
@@ -588,7 +891,6 @@ class AppProvider extends ChangeNotifier {
       groupTimers.remove(groupId)?.cancel();
       if (msgs == null || msgs.isEmpty) return;
 
-      // 广告过滤
       final anyAd = msgs.any((m) => _isAdvertisement(task, m.text, m.caption));
       if (anyAd) {
         addLog('🚫 媒体组[$groupId] 检测为广告，已跳过 (${msgs.length}条)',
@@ -596,7 +898,6 @@ class AppProvider extends ChangeNotifier {
         return;
       }
 
-      // 过滤媒体类型（检查组内第一条非文字媒体类型）
       final mediaMsg = msgs.firstWhere(
         (m) => m.mediaType != 'text',
         orElse: () => msgs.first,
@@ -607,7 +908,7 @@ class AppProvider extends ChangeNotifier {
       final msgIds = msgs.map((m) => m.messageId).toList()..sort();
       final srcChatId = msgs.first.chatId;
 
-      // AI处理（取第一条的文案）
+      // AI处理文案
       String? newCaption;
       final origCaption = msgs
           .map((m) => m.caption ?? m.text ?? '')
@@ -617,13 +918,11 @@ class AppProvider extends ChangeNotifier {
 
       for (final tgt in targets) {
         if (runner.cancelled) break;
-        // ★ 使用 copyMessages 批量转发整个媒体组（最多10条）
-        // 分批处理（每批10条）
         bool anySuccess = false;
         for (int i = 0; i < msgIds.length; i += 10) {
           final batch = msgIds.sublist(i, min(i + 10, msgIds.length));
           final ok = await TelegramBotService.instance.copyMessages(
-            token: account.botToken,
+            token: botToken ?? '',
             fromChatId: srcChatId,
             toChatId: tgt,
             messageIds: batch,
@@ -633,7 +932,8 @@ class AppProvider extends ChangeNotifier {
         }
 
         if (anySuccess) {
-          if (idx < tasks.length) tasks[idx].processedCount++;
+          final taskIdx = tasks.indexWhere((t) => t.id == task.id);
+          if (taskIdx >= 0) tasks[taskIdx].processedCount++;
           addLog('📨 媒体组[${msgs.length}条，ID:${msgIds.first}~${msgIds.last}] → $tgt ✅',
               level: LogLevel.success, taskId: task.id);
           _addRecord(task, srcChatId, tgt, msgIds.first, mediaMsg.mediaType,
@@ -652,7 +952,7 @@ class AppProvider extends ChangeNotifier {
         if (runner.cancelled) return;
         try {
           final updates = await TelegramBotService.instance.getUpdates(
-            account.botToken,
+            botToken ?? '',
             offset: lastUpdateId + 1,
             limit: 100,
           );
@@ -661,39 +961,32 @@ class AppProvider extends ChangeNotifier {
             if (runner.cancelled) break;
             if (msg.updateId > lastUpdateId) lastUpdateId = msg.updateId;
 
-            // 广告过滤（单条消息）
             if (_isAdvertisement(task, msg.text, msg.caption)) {
               addLog('🚫 消息#${msg.messageId} 检测为广告，跳过',
                   level: LogLevel.warning, taskId: task.id);
               continue;
             }
 
-            // 媒体类型过滤
             if (!_shouldInclude(task, msg.mediaType)) continue;
 
             if (msg.isInMediaGroup) {
-              // ★ 媒体组：收集同 groupId 的所有消息，延迟2s后统一转发
               final gid = msg.mediaGroupId!;
               groupBuffer.putIfAbsent(gid, () => []).add(msg);
-
-              // 重置计时器（等待同组更多消息）
               groupTimers[gid]?.cancel();
               groupTimers[gid] = Timer(const Duration(milliseconds: 2000), () {
                 flushGroup(gid);
               });
             } else {
-              // 单条消息：直接转发
               final targets =
                   task.targetChannels.isNotEmpty ? task.targetChannels : [''];
 
-              // AI处理文案
-              String? captionText = await _processCaption(
-                  task, aiService, msg.caption ?? msg.text);
+              String? captionText =
+                  await _processCaption(task, aiService, msg.caption ?? msg.text);
 
               for (final tgt in targets) {
                 if (runner.cancelled) break;
                 final newId = await TelegramBotService.instance.copyMessage(
-                  token: account.botToken,
+                  token: botToken ?? '',
                   fromChatId: msg.chatId,
                   toChatId: tgt,
                   messageId: msg.messageId,
@@ -701,7 +994,8 @@ class AppProvider extends ChangeNotifier {
                   removeCaption: task.removeCaption,
                 );
                 if (newId != null) {
-                  if (idx < tasks.length) tasks[idx].processedCount++;
+                  final taskIdx = tasks.indexWhere((t) => t.id == task.id);
+                  if (taskIdx >= 0) tasks[taskIdx].processedCount++;
                   addLog('📨 msg#${msg.messageId} → $tgt ✅',
                       level: LogLevel.success, taskId: task.id);
                   _addRecord(task, msg.chatId, tgt, msg.messageId,
@@ -777,6 +1071,21 @@ class _TaskRunner {
   bool cancelled;
   Timer? timer;
   _TaskRunner({required this.taskId, required this.cancelled});
+}
+
+/// 用户登录状态
+class UserLoginState {
+  final String step; // idle / code_input / password_input / done / error
+  final String? phoneCodeHash;
+  final String? phone;
+  final String? error;
+
+  UserLoginState({
+    required this.step,
+    this.phoneCodeHash,
+    this.phone,
+    this.error,
+  });
 }
 
 enum LogLevel { info, success, warning, error }

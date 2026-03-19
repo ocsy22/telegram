@@ -21,7 +21,8 @@ class TelegramAccount {
   AccountStatus status;
   String? username;
   String? avatar;
-  String? sessionString; // MTProto session 序列化字符串
+  String? sessionString; // MTProto session 序列化字符串（保留兼容性）
+  bool telethonAuthorized; // 是否已通过Telethon登录（Python桥接模式）
   String? errorMessage;
   DateTime addedAt;
 
@@ -37,9 +38,13 @@ class TelegramAccount {
     this.username,
     this.avatar,
     this.sessionString,
+    this.telethonAuthorized = false,
     this.errorMessage,
     DateTime? addedAt,
   }) : addedAt = addedAt ?? DateTime.now();
+
+  /// Telethon session key（用于Python桥接中识别此账号的session文件）
+  String get sessionKey => 'acc_${id.replaceAll('-', '')}';
 
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -51,6 +56,7 @@ class TelegramAccount {
     'type': type.name,
     'username': username ?? '',
     'sessionString': sessionString ?? '',
+    'telethonAuthorized': telethonAuthorized,
     'addedAt': addedAt.toIso8601String(),
   };
 
@@ -64,6 +70,7 @@ class TelegramAccount {
     type: j['type'] == 'bot' ? AccountType.bot : AccountType.userApi,
     username: j['username'],
     sessionString: j['sessionString'],
+    telethonAuthorized: j['telethonAuthorized'] ?? false,
     addedAt: DateTime.tryParse(j['addedAt'] ?? '') ?? DateTime.now(),
   );
 }
@@ -255,41 +262,52 @@ class CloneTask {
 
 // ==================== AiConfig ====================
 class AiConfig {
-  String provider;     // openai / deepseek / qianwen / zhipu / moonshot / gemini / custom
+  /// provider 支持：
+  ///   openai / deepseek / qianwen / zhipu / moonshot / gemini / openrouter /
+  ///   pollinations（免费，无需Key）/ custom
+  String provider;
   String apiKey;
   String model;
   String baseUrl;      // 自定义API地址
   bool enabled;
 
   AiConfig({
-    this.provider = 'openai',
+    this.provider = 'pollinations',
     this.apiKey = '',
-    this.model = 'gpt-3.5-turbo',
+    this.model = '',
     this.baseUrl = '',
     this.enabled = false,
   });
 
+  /// 是否为免费服务（不需要API Key）
+  bool get isFreeProvider =>
+      provider == 'pollinations';
+
   String get effectiveBaseUrl {
     if (baseUrl.isNotEmpty && provider != 'gemini') return baseUrl;
     switch (provider) {
-      case 'openai':   return 'https://api.openai.com/v1';
-      case 'deepseek': return 'https://api.deepseek.com/v1';
-      case 'qianwen':  return 'https://dashscope.aliyuncs.com/compatible-mode/v1';
-      case 'zhipu':    return 'https://open.bigmodel.cn/api/paas/v4';
-      case 'moonshot': return 'https://api.moonshot.cn/v1';
-      case 'gemini':   return 'https://generativelanguage.googleapis.com/v1beta';
-      default:         return 'https://api.openai.com/v1';
+      case 'openai':       return 'https://api.openai.com/v1';
+      case 'deepseek':     return 'https://api.deepseek.com/v1';
+      case 'qianwen':      return 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+      case 'zhipu':        return 'https://open.bigmodel.cn/api/paas/v4';
+      case 'moonshot':     return 'https://api.moonshot.cn/v1';
+      case 'gemini':       return 'https://generativelanguage.googleapis.com/v1beta';
+      case 'openrouter':   return 'https://openrouter.ai/api/v1';
+      case 'pollinations': return 'https://text.pollinations.ai';
+      default:             return 'https://api.openai.com/v1';
     }
   }
 
   String get defaultModel {
     switch (provider) {
-      case 'deepseek': return 'deepseek-chat';
-      case 'qianwen':  return 'qwen-turbo';
-      case 'zhipu':    return 'glm-4-flash';
-      case 'moonshot': return 'moonshot-v1-8k';
-      case 'gemini':   return 'gemini-2.0-flash-exp';
-      default:         return 'gpt-3.5-turbo';
+      case 'deepseek':     return 'deepseek-chat';
+      case 'qianwen':      return 'qwen-turbo';
+      case 'zhipu':        return 'glm-4-flash';
+      case 'moonshot':     return 'moonshot-v1-8k';
+      case 'gemini':       return 'gemini-2.0-flash-exp';
+      case 'openrouter':   return 'meta-llama/llama-3.1-8b-instruct:free';
+      case 'pollinations': return 'openai';
+      default:             return 'gpt-3.5-turbo';
     }
   }
 
@@ -302,9 +320,9 @@ class AiConfig {
   };
 
   factory AiConfig.fromJson(Map<String, dynamic> j) => AiConfig(
-    provider: j['provider'] ?? 'openai',
+    provider: j['provider'] ?? 'pollinations',
     apiKey: j['apiKey'] ?? '',
-    model: j['model'] ?? 'gpt-3.5-turbo',
+    model: j['model'] ?? '',
     baseUrl: j['baseUrl'] ?? '',
     enabled: j['enabled'] ?? false,
   );

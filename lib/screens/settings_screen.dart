@@ -23,6 +23,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   // 各提供商的可选模型列表
   static const Map<String, List<String>> _providerModels = {
+    // ===== 免费服务（无需API Key）=====
+    'pollinations': [
+      'openai',           // GPT-4o-mini（免费）
+      'mistral',          // Mistral Large（免费）
+      'claude-hybridspace', // Claude（免费）
+      'qwen-coder',       // 通义千问Coder（免费）
+      'deepseek-r1',      // DeepSeek R1（免费）
+      'llamascout',       // Llama Scout（免费）
+      'gemini',           // Gemini（免费）
+    ],
+    // ===== OpenRouter（有免费模型，需免费注册Key）=====
+    'openrouter': [
+      'meta-llama/llama-3.1-8b-instruct:free',
+      'meta-llama/llama-3.2-3b-instruct:free',
+      'google/gemma-3-12b-it:free',
+      'microsoft/phi-3-mini-128k-instruct:free',
+      'qwen/qwen-2-7b-instruct:free',
+      'mistralai/mistral-7b-instruct:free',
+      'nousresearch/hermes-3-llama-3.1-405b:free',
+    ],
+    // ===== 付费服务 =====
     'openai': [
       'gpt-3.5-turbo',
       'gpt-4',
@@ -50,6 +71,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
       'moonshot-v1-8k',
       'moonshot-v1-32k',
       'moonshot-v1-128k',
+    ],
+    'gemini': [
+      'gemini-2.0-flash-exp',
+      'gemini-1.5-flash',
+      'gemini-1.5-pro',
     ],
     'custom': [],
   };
@@ -149,6 +175,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   const Divider(),
                   const SizedBox(height: 12),
 
+                  // 免费服务商提示
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF00E676).withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0xFF00E676).withValues(alpha: 0.25)),
+                    ),
+                    child: const Row(
+                      children: [
+                        Icon(Icons.auto_awesome_rounded, color: Color(0xFF00E676), size: 15),
+                        SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            '💡 推荐：Pollinations AI 完全免费，无需注册，直接开启即可使用文案润色！\n'
+                            'OpenRouter 也提供免费模型（注册后获取免费Key）',
+                            style: TextStyle(color: Color(0xFF00E676), fontSize: 11),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+
                   // 服务商选择
                   _sectionLabel('AI 服务商'),
                   const SizedBox(height: 10),
@@ -157,11 +207,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     runSpacing: 8,
                     children: _providerModels.keys.map((key) {
                       const labels = {
+                        'pollinations': '🆓 Pollinations(免费)',
+                        'openrouter': '🆓 OpenRouter(免费模型)',
                         'openai': 'OpenAI',
                         'deepseek': 'DeepSeek',
                         'qianwen': '通义千问',
                         'zhipu': '智谱GLM',
                         'moonshot': 'Kimi',
+                        'gemini': 'Google Gemini',
                         'custom': '自定义',
                       };
                       return _providerChip(
@@ -176,36 +229,94 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   _buildModelSelector(context, settings, provider),
                   const SizedBox(height: 16),
 
-                  // API Key
-                  _sectionLabel('API Key'),
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: _aiKeyCtrl,
-                    obscureText: !_showApiKey,
-                    decoration: InputDecoration(
-                      hintText: _keyHint(settings.aiConfig.provider),
-                      suffixIcon: Row(
-                        mainAxisSize: MainAxisSize.min,
+                  // API Key（免费服务商不需要）
+                  if (!settings.aiConfig.isFreeProvider) ...[
+                    _sectionLabel('API Key'),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: _aiKeyCtrl,
+                      obscureText: !_showApiKey,
+                      decoration: InputDecoration(
+                        hintText: _keyHint(settings.aiConfig.provider),
+                        suffixIcon: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: Icon(
+                                  _showApiKey
+                                      ? Icons.visibility_off
+                                      : Icons.visibility,
+                                  size: 18),
+                              onPressed: () =>
+                                  setState(() => _showApiKey = !_showApiKey),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.save_rounded, size: 18),
+                              tooltip: '快速保存Key',
+                              onPressed: () => _quickSaveKey(provider, settings),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                  ] else ...[
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF00E676).withValues(alpha: 0.06),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: const Color(0xFF00E676).withValues(alpha: 0.2)),
+                      ),
+                      child: Row(
                         children: [
-                          IconButton(
-                            icon: Icon(
-                                _showApiKey
-                                    ? Icons.visibility_off
-                                    : Icons.visibility,
-                                size: 18),
-                            onPressed: () =>
-                                setState(() => _showApiKey = !_showApiKey),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.save_rounded, size: 18),
-                            tooltip: '快速保存Key',
-                            onPressed: () => _quickSaveKey(provider, settings),
+                          const Icon(Icons.check_circle_outline_rounded, 
+                              color: Color(0xFF00E676), size: 16),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              settings.aiConfig.provider == 'pollinations'
+                                  ? 'Pollinations AI 完全免费，无需API Key，直接开启使用！'
+                                  : '此服务商提供免费模型，请从 openrouter.ai 注册获取免费API Key',
+                              style: const TextStyle(color: Color(0xFF00E676), fontSize: 12),
+                            ),
                           ),
                         ],
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 12),
+                    const SizedBox(height: 12),
+                    if (settings.aiConfig.provider == 'openrouter') ...[
+                      _sectionLabel('API Key（OpenRouter免费Key）'),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: _aiKeyCtrl,
+                        obscureText: !_showApiKey,
+                        decoration: InputDecoration(
+                          hintText: 'sk-or-v1-... (openrouter.ai 免费注册获取)',
+                          suffixIcon: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                icon: Icon(
+                                    _showApiKey
+                                        ? Icons.visibility_off
+                                        : Icons.visibility,
+                                    size: 18),
+                                onPressed: () =>
+                                    setState(() => _showApiKey = !_showApiKey),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.save_rounded, size: 18),
+                                tooltip: '快速保存Key',
+                                onPressed: () => _quickSaveKey(provider, settings),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                  ],
 
                   // 自定义 API 地址（所有服务商都可以覆盖，custom必填）
                   _sectionLabel(settings.aiConfig.provider == 'custom'
@@ -331,6 +442,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       AppProvider provider, String value, String label) {
     final selected = settings.aiConfig.provider == value;
     final primary = Theme.of(context).colorScheme.primary;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    // 免费服务商用特殊颜色标识
+    final isFree = value == 'pollinations' || value == 'openrouter';
+    final accentColor = isFree ? const Color(0xFF00E676) : primary;
     return InkWell(
       onTap: () {
         final newModels = _providerModels[value] ?? [];
@@ -350,18 +465,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
       },
       borderRadius: BorderRadius.circular(10),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
         decoration: BoxDecoration(
-          color: selected ? primary.withValues(alpha: 0.2) : Colors.transparent,
+          color: selected ? accentColor.withValues(alpha: 0.2) : Colors.transparent,
           borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: selected ? primary : Colors.white24),
+          border: Border.all(
+              color: selected
+                  ? accentColor
+                  : (isDark ? Colors.white24 : Colors.black26)),
         ),
         child: Text(
           label,
           style: TextStyle(
-            color: selected ? primary : Colors.white54,
+            color: selected
+                ? accentColor
+                : (isDark ? Colors.white54 : Colors.black54),
             fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
-            fontSize: 13,
+            fontSize: 12,
           ),
         ),
       ),
@@ -532,12 +652,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
           SizedBox(height: 8),
           _Feature('✅ 无引用转发 - 转发内容不显示来源频道'),
           _Feature('✅ 媒体组整组转发 - 多视频/多图保持一条消息'),
+          _Feature('✅ 用户账号MTProto模式 - 读取私有/他人频道'),
+          _Feature('✅ 手机号验证码登录 - 完整MTProto授权'),
           _Feature('✅ 一对一/多对多克隆模式'),
-          _Feature('✅ 多账号管理（Bot Token/用户API）'),
+          _Feature('✅ 多账号管理（Bot Token/用户API+MTProto）'),
           _Feature('✅ 自由选择消息范围（起止ID）'),
           _Feature('✅ 24小时自动监听，实时转发新内容'),
           _Feature('✅ 广告过滤 - 自动跳过含链接/联系方式消息'),
-          _Feature('✅ AI文案润色/改写（支持6家AI服务商）'),
+          _Feature('✅ AI文案润色 - Pollinations免费可用，无需Key'),
+          _Feature('✅ AI改写支持：Pollinations/OpenRouter/Gemini等'),
           _Feature('✅ 内容类型过滤（图片/视频/文档等）'),
           _Feature('✅ 视频MD5修改（防重复检测）'),
           _Feature('✅ 白色/深色主题切换'),
@@ -559,6 +682,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return 'xxxxxxxx.xxxxxxxx';
       case 'moonshot':
         return 'sk-xxxxxxxxxxxxxxxx';
+      case 'gemini':
+        return 'AIzaSyxxxxxxxxxxxxxxxxx';
+      case 'openrouter':
+        return 'sk-or-v1-xxxxxxxxxx (openrouter.ai 免费注册)';
       default:
         return '输入您的API Key';
     }
@@ -566,7 +693,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _quickSaveKey(AppProvider provider, AppSettings settings) async {
     final newKey = _aiKeyCtrl.text.trim();
-    if (newKey.isEmpty) {
+    if (newKey.isEmpty && !settings.aiConfig.isFreeProvider) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('API Key 不能为空'), backgroundColor: Colors.orange),
       );
@@ -605,7 +732,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
 
     final apiKey = _aiKeyCtrl.text.trim();
-    if (apiKey.isEmpty) {
+    // 免费服务商不需要Key检查
+    if (apiKey.isEmpty && !settings.aiConfig.isFreeProvider && settings.aiConfig.provider != 'openrouter') {
       setState(() {
         _testingAi = false;
         _aiTestResult = '❌ 请先填写 API Key';

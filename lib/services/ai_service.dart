@@ -6,7 +6,11 @@ import 'package:http/io_client.dart' as http_io;
 import '../models/app_models.dart';
 
 /// AI 润色/改写服务
-/// 支持多家 AI 服务商，包括 Gemini (免费额度), OpenAI, DeepSeek 等
+/// 支持多家 AI 服务商：
+///   - Pollinations AI（免费，无需Key，直接可用）
+///   - OpenRouter（有免费模型，需注册Key）
+///   - Gemini（需Key，有免费额度）
+///   - OpenAI/DeepSeek/通义千问/智谱GLM/Kimi（需付费Key）
 class AiService {
   final AiConfig config;
   AiService({required this.config});
@@ -25,27 +29,157 @@ class AiService {
     int maxTokens = 500,
     double temperature = 0.8,
   }) async {
-    if (!config.enabled || config.apiKey.isEmpty) return null;
+    // 免费服务不需要检查API Key
+    if (!config.enabled) return null;
+    if (!config.isFreeProvider && config.apiKey.isEmpty) return null;
 
-    // Gemini 用专用接口
-    if (config.provider == 'gemini') {
-      return _callGemini(
-        prompt: '$systemPrompt\n\n$prompt',
-        maxTokens: maxTokens,
-        temperature: temperature,
-      );
+    switch (config.provider) {
+      case 'pollinations':
+        return _callPollinations(
+          systemPrompt: systemPrompt,
+          prompt: prompt,
+          maxTokens: maxTokens,
+          temperature: temperature,
+        );
+      case 'openrouter':
+        return _callOpenRouter(
+          prompt: prompt,
+          systemPrompt: systemPrompt,
+          maxTokens: maxTokens,
+          temperature: temperature,
+        );
+      case 'gemini':
+        return _callGemini(
+          prompt: '$systemPrompt\n\n$prompt',
+          maxTokens: maxTokens,
+          temperature: temperature,
+        );
+      default:
+        // OpenAI兼容接口（openai/deepseek/qianwen/zhipu/moonshot/custom）
+        return _callOpenAICompatible(
+          prompt: prompt,
+          systemPrompt: systemPrompt,
+          maxTokens: maxTokens,
+          temperature: temperature,
+        );
     }
-
-    // OpenAI 兼容接口（openai/deepseek/qianwen/zhipu/moonshot/custom）
-    return _callOpenAICompatible(
-      prompt: prompt,
-      systemPrompt: systemPrompt,
-      maxTokens: maxTokens,
-      temperature: temperature,
-    );
   }
 
-  /// Gemini API 调用（免费版 gemini-2.0-flash-exp 或 gemini-1.5-flash）
+  // ===== Pollinations AI（完全免费，无需注册）=====
+  /// Pollinations.AI 免费文本生成API
+  /// 文档：https://text.pollinations.ai
+  Future<String?> _callPollinations({
+    required String systemPrompt,
+    required String prompt,
+    int maxTokens = 500,
+    double temperature = 0.8,
+  }) async {
+    final model = config.model.isNotEmpty ? config.model : 'openai';
+    final client = _client();
+    try {
+      // 先尝试GET请求（简单模式）
+      final resp = await client
+          .get(Uri.parse('https://text.pollinations.ai/${Uri.encodeComponent(prompt)}'
+              '?model=$model'
+              '&system=${Uri.encodeComponent(systemPrompt)}'
+              '&temperature=$temperature'))
+          .timeout(const Duration(seconds: 30));
+
+      if (resp.statusCode == 200 && resp.body.isNotEmpty) {
+        final text = resp.body.trim();
+        if (text.isNotEmpty && !text.startsWith('<') && !text.startsWith('{')) {
+          return text;
+        }
+      }
+
+      // 降级：POST JSON格式（OpenAI兼容）
+      final postResp = await client
+          .post(
+            Uri.parse('https://text.pollinations.ai/openai'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'model': model,
+              'messages': [
+                {'role': 'system', 'content': systemPrompt},
+                {'role': 'user', 'content': prompt},
+              ],
+              'max_tokens': maxTokens,
+              'temperature': temperature,
+              'seed': DateTime.now().millisecondsSinceEpoch % 9999,
+            }),
+          )
+          .timeout(const Duration(seconds: 30));
+
+      if (postResp.statusCode == 200) {
+        final data = jsonDecode(postResp.body) as Map<String, dynamic>;
+        final choices = data['choices'] as List?;
+        if (choices != null && choices.isNotEmpty) {
+          final msg = choices[0]['message'] as Map<String, dynamic>?;
+          return (msg?['content'] as String?)?.trim();
+        }
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('Pollinations exception: $e');
+    } finally {
+      client.close();
+    }
+    return null;
+  }
+
+  // ===== OpenRouter（有免费模型）=====
+  Future<String?> _callOpenRouter({
+    required String prompt,
+    required String systemPrompt,
+    int maxTokens = 500,
+    double temperature = 0.8,
+  }) async {
+    final model = config.model.isNotEmpty
+        ? config.model
+        : 'meta-llama/llama-3.1-8b-instruct:free';
+    final client = _client();
+    try {
+      final resp = await client
+          .post(
+            Uri.parse('https://openrouter.ai/api/v1/chat/completions'),
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer ${config.apiKey}',
+              'HTTP-Referer': 'https://github.com/channelcloner',
+              'X-Title': 'Channel Cloner',
+            },
+            body: jsonEncode({
+              'model': model,
+              'messages': [
+                {'role': 'system', 'content': systemPrompt},
+                {'role': 'user', 'content': prompt},
+              ],
+              'max_tokens': maxTokens,
+              'temperature': temperature,
+            }),
+          )
+          .timeout(const Duration(seconds: 60));
+      if (resp.statusCode == 200) {
+        final data = jsonDecode(resp.body) as Map<String, dynamic>;
+        final choices = data['choices'] as List?;
+        if (choices != null && choices.isNotEmpty) {
+          final msg = choices[0]['message'] as Map<String, dynamic>?;
+          return (msg?['content'] as String?)?.trim();
+        }
+      } else {
+        if (kDebugMode) {
+          debugPrint('OpenRouter error ${resp.statusCode}: '
+              '${resp.body.substring(0, resp.body.length.clamp(0, 200))}');
+        }
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('OpenRouter exception: $e');
+    } finally {
+      client.close();
+    }
+    return null;
+  }
+
+  // ===== Gemini API =====
   Future<String?> _callGemini({
     required String prompt,
     int maxTokens = 500,
@@ -70,7 +204,6 @@ class AiService {
           'temperature': temperature,
           'maxOutputTokens': maxTokens,
         },
-        // 关闭安全过滤以支持成人内容润色
         'safetySettings': [
           {'category': 'HARM_CATEGORY_HARASSMENT', 'threshold': 'BLOCK_NONE'},
           {'category': 'HARM_CATEGORY_HATE_SPEECH', 'threshold': 'BLOCK_NONE'},
@@ -95,13 +228,10 @@ class AiService {
             return (parts[0]['text'] as String?)?.trim();
           }
         }
-        // 检查是否被安全过滤阻断
-        if (data['promptFeedback'] != null) {
-          if (kDebugMode) debugPrint('Gemini blocked: ${data['promptFeedback']}');
-        }
       } else {
         if (kDebugMode) {
-          debugPrint('Gemini error ${resp.statusCode}: ${resp.body.substring(0, resp.body.length.clamp(0, 300))}');
+          debugPrint('Gemini error ${resp.statusCode}: '
+              '${resp.body.substring(0, resp.body.length.clamp(0, 300))}');
         }
       }
     } catch (e) {
@@ -112,7 +242,7 @@ class AiService {
     return null;
   }
 
-  /// OpenAI 兼容接口调用
+  // ===== OpenAI兼容接口 =====
   Future<String?> _callOpenAICompatible({
     required String prompt,
     required String systemPrompt,
@@ -151,7 +281,8 @@ class AiService {
         }
       } else {
         if (kDebugMode) {
-          debugPrint('AI API error ${resp.statusCode}: ${resp.body.substring(0, resp.body.length.clamp(0, 200))}');
+          debugPrint('AI API error ${resp.statusCode}: '
+              '${resp.body.substring(0, resp.body.length.clamp(0, 200))}');
         }
       }
     } catch (e) {
@@ -165,7 +296,6 @@ class AiService {
   // ===== 润色功能 =====
 
   /// 轻度润色文案（保持原意，稍作修改避免重复）
-  /// 专为频道内容设计，支持18+内容
   Future<String?> polishCaption({
     required String originalCaption,
     String? customPrompt,
@@ -184,6 +314,7 @@ class AiService {
 5. 保留原文中的表情符号，可以适当调整位置或数量
 6. 如果原文很短（少于10字），保持简短风格
 7. 涉及成人内容时，保持原有尺度，用更生动的词汇替换
+8. 语言：保持和原文相同的语言
 
 ${customPrompt != null && customPrompt.isNotEmpty ? "额外要求：$customPrompt" : ""}''';
 
@@ -197,7 +328,7 @@ ${customPrompt != null && customPrompt.isNotEmpty ? "额外要求：$customPromp
     );
   }
 
-  /// 完全改写文案（大幅修改，保持主题）
+  /// 完全改写文案
   Future<String?> rewriteCaption({
     String? originalCaption,
     String? prompt,
@@ -209,7 +340,8 @@ ${customPrompt != null && customPrompt.isNotEmpty ? "额外要求：$customPromp
 3. 可以适当添加emoji
 4. 不要添加多余解释，直接输出改写内容
 5. 涉及成人/18+内容时保持尺度，用更吸引人的描述
-${prompt != null && prompt.isNotEmpty ? "6. 额外要求：$prompt" : ""}''';
+6. 语言：保持和原文相同的语言
+${prompt != null && prompt.isNotEmpty ? "7. 额外要求：$prompt" : ""}''';
 
     final userMsg = originalCaption != null && originalCaption.isNotEmpty
         ? '请改写以下Telegram内容：\n\n$originalCaption'
@@ -236,9 +368,27 @@ ${prompt != null && prompt.isNotEmpty ? "6. 额外要求：$prompt" : ""}''';
 
   /// 测试 AI 连接
   Future<bool> testConnection() async {
+    if (config.provider == 'pollinations') {
+      final result = await _callPollinations(
+        systemPrompt: '你是一个AI助手。',
+        prompt: '请只回复数字"1"',
+        maxTokens: 10,
+        temperature: 0.1,
+      );
+      return result != null && result.isNotEmpty;
+    }
     if (config.provider == 'gemini') {
       final result = await _callGemini(
         prompt: '请只回复数字"1"，不要其他任何内容。',
+        maxTokens: 10,
+        temperature: 0.1,
+      );
+      return result != null && result.isNotEmpty;
+    }
+    if (config.provider == 'openrouter') {
+      final result = await _callOpenRouter(
+        prompt: '请回复"ok"两个字',
+        systemPrompt: '你是一个AI助手。',
         maxTokens: 10,
         temperature: 0.1,
       );
