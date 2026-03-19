@@ -244,68 +244,51 @@ def progress(req_id, msg):
     send_response({"type": "progress", "req_id": req_id, "msg": msg})
 
 
+def progress(req_id, msg):
+    """发送进度消息"""
+    send_response({"type": "progress", "req_id": req_id, "msg": msg})
+
+
 async def _complete_media_groups(client, entity, messages: list) -> list:
     """
-    补全媒体组：Telegram 媒体组的各条消息 ID 不连续且可能横跨查询边界。
-    例如用户指定 start_id=end_id=100，但这条消息属于媒体组（98,99,100,101,102），
-    只 iter_messages 只拿到 ID=100，导致转发只有1张图。
-    
-    修复：
-    1. 收集所有已获取消息的 grouped_id
-    2. 对每个 grouped_id，向前/后各扩展 20 条，抓取同组的其他消息
-    3. 合并去重，返回完整消息列表
+    补全媒体组：用 grouped_id 确保同组消息全部包含。
+    原理：先获取边界消息附近各10条，筛选出相同 grouped_id 的消息补充进来。
+    全程加 asyncio.wait_for 超时保护，避免卡死。
     """
     if not messages:
         return messages
 
     already_ids = {m.id for m in messages}
-
-    # 找出哪些消息属于媒体组
-    grouped_ids_seen = {}  # grouped_id -> list of msgs in that group
+    grouped_ids_seen = {}
     for m in messages:
         if m.grouped_id:
-            gid = m.grouped_id
-            grouped_ids_seen.setdefault(gid, []).append(m)
+            grouped_ids_seen.setdefault(m.grouped_id, []).append(m)
 
     if not grouped_ids_seen:
-        return messages  # 没有媒体组，直接返回
+        return messages
 
     extra_msgs = []
     for gid, group_msgs in grouped_ids_seen.items():
-        # 取该组在已抓取消息中的最小/最大 ID
-        min_id_in_group = min(m.id for m in group_msgs)
-        max_id_in_group = max(m.id for m in group_msgs)
-
-        # 向前扩展：抓 min_id 前的20条，补可能被截断的前半段
+        min_id = min(m.id for m in group_msgs)
+        max_id = max(m.id for m in group_msgs)
+        # 用 ID 列表直接查询周围10条，比 min_id/max_id 组合更可靠
+        check_ids = list(range(max(1, min_id - 10), min_id)) + \
+                    list(range(max_id + 1, max_id + 11))
+        if not check_ids:
+            continue
         try:
-            before = await client.get_messages(
-                entity, min_id=max(0, min_id_in_group - 21),
-                max_id=min_id_in_group, limit=20
+            nearby = await asyncio.wait_for(
+                client.get_messages(entity, ids=check_ids),
+                timeout=10
             )
-            for m in before:
+            for m in (nearby or []):
                 if m and m.grouped_id == gid and m.id not in already_ids:
                     extra_msgs.append(m)
                     already_ids.add(m.id)
         except Exception:
-            pass
+            pass  # 超时或失败直接跳过，不影响主流程
 
-        # 向后扩展：抓 max_id 后的20条，补可能被截断的后半段
-        try:
-            after = await client.get_messages(
-                entity, min_id=max_id_in_group,
-                max_id=max_id_in_group + 21, limit=20
-            )
-            for m in after:
-                if m and m.grouped_id == gid and m.id not in already_ids:
-                    extra_msgs.append(m)
-                    already_ids.add(m.id)
-        except Exception:
-            pass
-
-    if extra_msgs:
-        messages = messages + extra_msgs
-
-    return messages
+    return messages + extra_msgs
 
 
 async def cmd_clone_messages(cmd, req_id):
@@ -609,27 +592,44 @@ async def cmd_disconnect(cmd, req_id):
 async def main():
     """主循环：从stdin读取命令，处理后输出到stdout"""
     send_response({"type": "ready", "version": "2.0.0"})
-    
+
     loop = asyncio.get_event_loop()
-    
-    while True:
-        try:
-            line = await loop.run_in_executor(None, sys.stdin.readline)
-            if not line:
+
+    # ★★★ 关键修复：Windows ProactorEventLoop下 run_in_executor(readline)
+    # 会持续占用事件循环线程，导致clone_messages里的await无法推进。
+    # 改用专用线程 + asyncio.Queue 完全解耦stdin读取与事件循环。
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def _read_stdin():
+        """在独立线程里持续读stdin，把每行放入queue"""
+        while True:
+            try:
+                line = sys.stdin.readline()
+                if not line:        # EOF
+                    loop.call_soon_threadsafe(queue.put_nowait, None)
+                    break
+                line = line.strip()
+                if line:
+                    loop.call_soon_threadsafe(queue.put_nowait, line)
+            except Exception:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
                 break
-            line = line.strip()
-            if not line:
-                continue
+
+    import threading
+    t = threading.Thread(target=_read_stdin, daemon=True)
+    t.start()
+
+    while True:
+        line = await queue.get()
+        if line is None:
+            break
+        try:
             cmd = json.loads(line)
             # 异步处理命令，不阻塞主循环
             asyncio.ensure_future(handle_command(cmd))
         except json.JSONDecodeError as e:
             send_response({"type": "error", "error": f"JSON解析失败: {e}"})
-        except EOFError:
-            break
-        except KeyboardInterrupt:
-            break
-    
+
     # 断开所有连接
     for client in clients.values():
         try:
