@@ -238,6 +238,70 @@ def progress(req_id, msg):
     send_response({"type": "progress", "req_id": req_id, "msg": msg})
 
 
+async def _complete_media_groups(client, entity, messages: list) -> list:
+    """
+    补全媒体组：Telegram 媒体组的各条消息 ID 不连续且可能横跨查询边界。
+    例如用户指定 start_id=end_id=100，但这条消息属于媒体组（98,99,100,101,102），
+    只 iter_messages 只拿到 ID=100，导致转发只有1张图。
+    
+    修复：
+    1. 收集所有已获取消息的 grouped_id
+    2. 对每个 grouped_id，向前/后各扩展 20 条，抓取同组的其他消息
+    3. 合并去重，返回完整消息列表
+    """
+    if not messages:
+        return messages
+
+    already_ids = {m.id for m in messages}
+
+    # 找出哪些消息属于媒体组
+    grouped_ids_seen = {}  # grouped_id -> list of msgs in that group
+    for m in messages:
+        if m.grouped_id:
+            gid = m.grouped_id
+            grouped_ids_seen.setdefault(gid, []).append(m)
+
+    if not grouped_ids_seen:
+        return messages  # 没有媒体组，直接返回
+
+    extra_msgs = []
+    for gid, group_msgs in grouped_ids_seen.items():
+        # 取该组在已抓取消息中的最小/最大 ID
+        min_id_in_group = min(m.id for m in group_msgs)
+        max_id_in_group = max(m.id for m in group_msgs)
+
+        # 向前扩展：抓 min_id 前的20条，补可能被截断的前半段
+        try:
+            before = await client.get_messages(
+                entity, min_id=max(0, min_id_in_group - 21),
+                max_id=min_id_in_group, limit=20
+            )
+            for m in before:
+                if m and m.grouped_id == gid and m.id not in already_ids:
+                    extra_msgs.append(m)
+                    already_ids.add(m.id)
+        except Exception:
+            pass
+
+        # 向后扩展：抓 max_id 后的20条，补可能被截断的后半段
+        try:
+            after = await client.get_messages(
+                entity, min_id=max_id_in_group,
+                max_id=max_id_in_group + 21, limit=20
+            )
+            for m in after:
+                if m and m.grouped_id == gid and m.id not in already_ids:
+                    extra_msgs.append(m)
+                    already_ids.add(m.id)
+        except Exception:
+            pass
+
+    if extra_msgs:
+        messages = messages + extra_msgs
+
+    return messages
+
+
 async def cmd_clone_messages(cmd, req_id):
     """
     克隆消息：从源频道读取，无引用转发到目标频道
@@ -270,18 +334,21 @@ async def cmd_clone_messages(cmd, req_id):
         send_response({"type": "error", "req_id": req_id, "error": f"无法访问源频道: {e}"})
         return
     
-    # 获取消息列表
+    # ★★★ 获取消息列表 + 自动补全媒体组 ★★★
+    # 关键修复：媒体组的图片/视频 ID 不连续（如组ID对应 98,99,100,101,102），
+    # 只按范围 iter_messages 只拿到范围内的那一条，造成"只转发一张图"。
+    # 正确做法：拿到消息后检查 grouped_id，向前后各扩展10条补全整个媒体组。
     messages = []
     try:
         progress(req_id, f"读取消息中（范围: {start_id}~{end_id or '最新'}, 最多{count}条）...")
         if start_id > 0 and end_id > 0:
-            # 指定范围 - 注意：iter_messages是倒序的，min_id/max_id控制范围
+            # 指定范围
             async for msg in client.iter_messages(
                 source_entity, min_id=start_id-1, max_id=end_id+1, limit=None
             ):
-                if msg and not msg.action:  # 跳过服务消息
+                if msg and not msg.action:
                     messages.append(msg)
-                if len(messages) >= 5000:  # 安全上限
+                if len(messages) >= 5000:
                     break
         elif start_id > 0:
             async for msg in client.iter_messages(
@@ -300,10 +367,16 @@ async def cmd_clone_messages(cmd, req_id):
             async for msg in client.iter_messages(source_entity, limit=count):
                 if msg and not msg.action:
                     messages.append(msg)
-        
+
         # 按消息ID升序排列（从旧到新）
         messages.sort(key=lambda m: m.id)
-        
+
+        # ★ 关键：补全边界处被截断的媒体组 ★
+        # 原理：媒体组中各条消息 ID 连续但可能横跨查询边界，
+        # 只要有任意一条在范围内，就需要把整个媒体组都补进来
+        messages = await _complete_media_groups(client, source_entity, messages)
+        messages.sort(key=lambda m: m.id)
+
     except Exception as e:
         send_response({"type": "error", "req_id": req_id, "error": f"读取消息失败: {e}"})
         return
