@@ -282,7 +282,6 @@ class AiConfig {
   /// 是否为免费服务（不需要API Key）
   bool get isFreeProvider =>
       provider == 'pollinations';
-
   String get effectiveBaseUrl {
     if (baseUrl.isNotEmpty && provider != 'gemini') return baseUrl;
     switch (provider) {
@@ -294,6 +293,7 @@ class AiConfig {
       case 'gemini':       return 'https://generativelanguage.googleapis.com/v1beta';
       case 'openrouter':   return 'https://openrouter.ai/api/v1';
       case 'pollinations': return 'https://text.pollinations.ai';
+      case 'groq':         return 'https://api.groq.com/openai/v1';
       default:             return 'https://api.openai.com/v1';
     }
   }
@@ -307,6 +307,7 @@ class AiConfig {
       case 'gemini':       return 'gemini-2.0-flash-exp';
       case 'openrouter':   return 'meta-llama/llama-3.1-8b-instruct:free';
       case 'pollinations': return 'openai';
+      case 'groq':         return 'llama-3.1-8b-instant';
       default:             return 'gpt-3.5-turbo';
     }
   }

@@ -11,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import '../models/app_models.dart';
 import '../services/telegram_bot_service.dart';
+import '../services/telegram_api_service.dart';
 import '../services/ai_service.dart';
 import '../services/telethon_service.dart';
 
@@ -743,7 +744,7 @@ class AppProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ===== Bot API克隆（原有逻辑）=====
+  // ===== Bot API克隆（改进版：智能识别公开/私有频道 + AI润色 + 详细错误）=====
   Future<void> _runCloneTaskWithBot(
     CloneTask task,
     String botToken,
@@ -754,27 +755,61 @@ class AppProvider extends ChangeNotifier {
     int end,
     int idx,
   ) async {
+    TelegramApiService.instance.setIgnoreSsl(settings.ignoreSsl);
+    // aiService reserved for future AI caption processing in clone mode
+    // final aiService = AiService(config: settings.aiConfig);
+
     int processed = 0;
     int skipped = 0;
-    const scanBatch = 50;
+    int notFoundCount = 0;
+    int permErrorCount = 0;
 
-    int msgCursor = start;
-    while (msgCursor <= end && !runner.cancelled) {
-      final scanEnd = min(msgCursor + scanBatch - 1, end);
-      final scanIds = List.generate(scanEnd - msgCursor + 1, (i) => msgCursor + i);
+    for (final src in sources) {
+      if (runner.cancelled) break;
 
-      for (final src in sources) {
-        if (runner.cancelled) break;
-        for (final tgt in targets) {
+      // ===== 判断频道类型，选择最优策略 =====
+      final isPublicChannel = TelegramApiService.instance.looksLikePublicChannel(src);
+
+      if (isPublicChannel) {
+        // ===== 公开频道：通过 t.me/s/ 抓取真实消息ID列表后转发 =====
+        addLog(
+          '🌐 检测到公开频道 $src，使用网页抓取模式获取消息ID列表...',
+          level: LogLevel.info, taskId: task.id,
+        );
+
+        final cleanName = src.startsWith('@') ? src.substring(1) : src;
+        final msgIds = await TelegramApiService.instance.getPublicChannelMsgIds(
+          username: cleanName,
+          startId: start,
+          endId: end,
+          maxCount: task.cloneCount > 0 ? task.cloneCount : 1000,
+          onLog: (msg) => addLog(msg, taskId: task.id),
+        );
+
+        if (msgIds.isEmpty) {
+          addLog(
+            '⚠️ 未抓取到消息ID（startId=$start endId=$end）\n'
+            '   请检查频道用户名是否正确，以及消息ID范围是否有效',
+            level: LogLevel.warning, taskId: task.id,
+          );
+          continue;
+        }
+
+        addLog('📋 已获取 ${msgIds.length} 条真实消息ID，开始转发...',
+            level: LogLevel.info, taskId: task.id);
+
+        if (idx < tasks.length) tasks[idx].totalCount = msgIds.length;
+
+        // 将msgIds分批处理
+        for (int batchStart = 0; batchStart < msgIds.length; batchStart += 10) {
           if (runner.cancelled) break;
+          final batchEnd = min(batchStart + 10, msgIds.length);
+          final batchIds = msgIds.sublist(batchStart, batchEnd);
 
-          for (int batchStart = 0; batchStart < scanIds.length; batchStart += 10) {
+          for (final tgt in targets) {
             if (runner.cancelled) break;
-            final batchEnd = min(batchStart + 10, scanIds.length);
-            final batchIds = scanIds.sublist(batchStart, batchEnd);
-
             try {
-              final ok = await TelegramBotService.instance.copyMessages(
+              final result = await TelegramBotService.instance.copyMessagesWithDetail(
                 token: botToken,
                 fromChatId: src,
                 toChatId: tgt,
@@ -782,65 +817,199 @@ class AppProvider extends ChangeNotifier {
                 removeCaption: task.removeCaption,
               );
 
-              if (ok) {
+              if (result.success) {
                 processed += batchIds.length;
                 addLog(
-                  '✅ 批量转发 msg[${batchIds.first}~${batchIds.last}] (${batchIds.length}条) $src → $tgt',
-                  level: LogLevel.success,
-                  taskId: task.id,
+                  '✅ 已转发 msg[${batchIds.first}~${batchIds.last}] (${batchIds.length}条) → $tgt',
+                  level: LogLevel.success, taskId: task.id,
                 );
                 _addRecord(task, src, tgt, batchIds.first, 'batch', false);
               } else {
-                // 批量失败 → 逐条尝试
-                for (final mid in batchIds) {
-                  if (runner.cancelled) break;
-
-                  final newMsgId = await TelegramBotService.instance.copyMessage(
-                    token: botToken,
-                    fromChatId: src,
-                    toChatId: tgt,
-                    messageId: mid,
-                    removeCaption: task.removeCaption,
-                  );
-                  if (newMsgId != null) {
-                    processed++;
-                    addLog('✅ msg[$mid] $src → $tgt',
-                        level: LogLevel.success, taskId: task.id);
-                    _addRecord(task, src, tgt, mid, 'media', false);
-                  } else {
-                    skipped++;
-                    if (skipped <= 30) {
-                      addLog('⚪ msg[$mid] 跳过（消息不存在/Bot无权限）',
-                          taskId: task.id);
-                    }
+                addLog(
+                  '❌ 批量转发失败 msg[${batchIds.first}~${batchIds.last}] → $tgt\n'
+                  '   错误: ${result.errorDescription}',
+                  level: LogLevel.error, taskId: task.id,
+                );
+                if (result.singleErrors.isNotEmpty) {
+                  for (final e in result.singleErrors.take(5)) {
+                    addLog('   ↳ $e', level: LogLevel.warning, taskId: task.id);
                   }
-                  await Future.delayed(const Duration(milliseconds: 500));
                 }
+                skipped += batchIds.length;
               }
             } catch (e) {
-              addLog('❌ 批量转发 msg[${batchIds.first}~${batchIds.last}] 错误: $e',
-                  level: LogLevel.error, taskId: task.id);
+              addLog('❌ 转发异常: $e', level: LogLevel.error, taskId: task.id);
             }
+          }
 
-            if (!runner.cancelled) {
-              await Future.delayed(const Duration(milliseconds: 800));
+          if (idx < tasks.length) {
+            tasks[idx].processedCount = processed;
+            tasks[idx].progress = (batchEnd) / max(1, msgIds.length);
+          }
+          notifyListeners();
+
+          if (!runner.cancelled && batchStart + 10 < msgIds.length) {
+            final delay = task.delayMin +
+                Random().nextInt(max(1, task.delayMax - task.delayMin + 1));
+            await Future.delayed(Duration(seconds: delay));
+          }
+        }
+
+      } else {
+        // ===== 私有频道/数字ID：直接用Bot API转发（Bot须已加入频道）=====
+        addLog(
+          '🔒 使用Bot API直接模式（Bot需已加入频道 $src）...\n'
+          '   注意：copyMessage要求Bot在源频道有读取权限',
+          level: LogLevel.info, taskId: task.id,
+        );
+
+        // 先验证Bot是否能访问此频道
+        final accessInfo = await TelegramApiService.instance.checkChannelAccess(
+          token: botToken,
+          chatId: src,
+        );
+
+        if (!accessInfo.canAccess) {
+          addLog(
+            '❌ Bot无法访问频道 $src\n'
+            '   错误: ${accessInfo.errorMsg}\n'
+            '   ${accessInfo.isPrivateNoAccess ? "请将Bot添加为频道管理员或成员" : ""}',
+            level: LogLevel.error, taskId: task.id,
+          );
+          continue;
+        }
+
+        addLog(
+          '✅ Bot已验证可访问频道: ${accessInfo.title ?? src} '
+          '(${accessInfo.isPublic ? "公开" : "私有"})',
+          level: LogLevel.success, taskId: task.id,
+        );
+
+        const scanBatch = 50;
+        int msgCursor = start;
+
+        while (msgCursor <= end && !runner.cancelled) {
+          final scanEnd = min(msgCursor + scanBatch - 1, end);
+          final scanIds = List.generate(scanEnd - msgCursor + 1, (i) => msgCursor + i);
+
+          for (final tgt in targets) {
+            if (runner.cancelled) break;
+
+            for (int batchStart = 0; batchStart < scanIds.length; batchStart += 10) {
+              if (runner.cancelled) break;
+              final batchEnd2 = min(batchStart + 10, scanIds.length);
+              final batchIds = scanIds.sublist(batchStart, batchEnd2);
+
+              try {
+                final result = await TelegramBotService.instance.copyMessagesWithDetail(
+                  token: botToken,
+                  fromChatId: src,
+                  toChatId: tgt,
+                  messageIds: batchIds,
+                  removeCaption: task.removeCaption,
+                );
+
+                if (result.success) {
+                  processed += batchIds.length;
+                  addLog(
+                    '✅ 批量转发 msg[${batchIds.first}~${batchIds.last}] → $tgt',
+                    level: LogLevel.success, taskId: task.id,
+                  );
+                  _addRecord(task, src, tgt, batchIds.first, 'batch', false);
+                } else {
+                  // 逐条处理，输出详细错误
+                  for (final mid in batchIds) {
+                    if (runner.cancelled) break;
+                    final cr = await TelegramBotService.instance.copyMessageWithDetail(
+                      token: botToken,
+                      fromChatId: src,
+                      toChatId: tgt,
+                      messageId: mid,
+                      removeCaption: task.removeCaption,
+                    );
+                    if (cr.success) {
+                      processed++;
+                      addLog('✅ msg[$mid] → $tgt',
+                          level: LogLevel.success, taskId: task.id);
+                      _addRecord(task, src, tgt, mid, 'media', false);
+                    } else {
+                      skipped++;
+                      if (cr.isNotFound) {
+                        notFoundCount++;
+                        if (notFoundCount <= 5) {
+                          addLog(
+                            '⚪ msg[$mid] 跳过：消息不存在（ID:${cr.errorCode}）',
+                            taskId: task.id,
+                          );
+                        }
+                      } else if (cr.isPermissionError) {
+                        permErrorCount++;
+                        addLog(
+                          '🔒 msg[$mid] 权限错误：${cr.errorDescription}\n'
+                          '   请确认Bot已加入频道 $src 并有消息读取权限',
+                          level: LogLevel.error, taskId: task.id,
+                        );
+                        // 连续权限错误，停止此频道
+                        if (permErrorCount >= 3) {
+                          addLog(
+                            '⛔ 连续 $permErrorCount 次权限错误，停止此频道。\n'
+                            '   解决方案：\n'
+                            '   1. 将Bot添加为频道 $src 的管理员\n'
+                            '   2. 或使用用户API账号（需要Python+Telethon）',
+                            level: LogLevel.error, taskId: task.id,
+                          );
+                          runner.cancelled = true;
+                          break;
+                        }
+                      } else if (cr.isRateLimited) {
+                        addLog('⏳ 触发限流，等待30秒...', taskId: task.id);
+                        await Future.delayed(const Duration(seconds: 30));
+                      } else {
+                        if (skipped <= 20) {
+                          addLog(
+                            '⚠️ msg[$mid] 失败(${cr.errorCode}): ${cr.errorDescription}',
+                            level: LogLevel.warning, taskId: task.id,
+                          );
+                        }
+                      }
+                    }
+                    await Future.delayed(const Duration(milliseconds: 500));
+                  }
+                }
+              } catch (e) {
+                addLog('❌ 批量异常: $e', level: LogLevel.error, taskId: task.id);
+              }
+
+              if (!runner.cancelled) {
+                await Future.delayed(const Duration(milliseconds: 800));
+              }
             }
+          }
+
+          if (idx < tasks.length) {
+            tasks[idx].processedCount = processed;
+            tasks[idx].progress = (scanEnd - start + 1) / max(1, end - start + 1);
+          }
+          notifyListeners();
+          msgCursor = scanEnd + 1;
+
+          if (msgCursor <= end && !runner.cancelled) {
+            final delay = task.delayMin +
+                Random().nextInt(max(1, task.delayMax - task.delayMin + 1));
+            await Future.delayed(Duration(seconds: delay));
           }
         }
       }
+    }
 
-      if (idx < tasks.length) {
-        tasks[idx].processedCount = processed;
-        tasks[idx].progress = (scanEnd - start + 1) / max(1, end - start + 1);
-      }
-      notifyListeners();
-      msgCursor = scanEnd + 1;
-
-      if (msgCursor <= end && !runner.cancelled) {
-        final delay = task.delayMin +
-            Random().nextInt(max(1, task.delayMax - task.delayMin + 1));
-        await Future.delayed(Duration(seconds: delay));
-      }
+    // ===== AI文案润色（克隆完成后提示）=====
+    if ((task.aiRewrite || task.aiPolish) && settings.aiConfig.enabled) {
+      addLog(
+        '💡 提示：克隆模式AI润色需要Bot API支持获取消息内容。\n'
+        '   当前版本在监听模式下AI润色效果最佳（实时获取新消息文案）。\n'
+        '   使用MTProto用户API账号可在克隆时也实现AI润色。',
+        level: LogLevel.info, taskId: task.id,
+      );
     }
 
     if (!runner.cancelled) {
@@ -848,8 +1017,11 @@ class AppProvider extends ChangeNotifier {
         tasks[idx].status = TaskStatus.completed;
         tasks[idx].progress = 1.0;
       }
-      addLog('🎉 任务[${task.name}]完成！成功$processed条，跳过$skipped条',
-          level: LogLevel.success, taskId: task.id);
+      addLog(
+        '🎉 任务[${task.name}]完成！成功$processed条，跳过$skipped条'
+        '${notFoundCount > 0 ? "（含$notFoundCount条不存在消息）" : ""}',
+        level: LogLevel.success, taskId: task.id,
+      );
     }
     _runners.remove(task.id);
     await _saveAll();

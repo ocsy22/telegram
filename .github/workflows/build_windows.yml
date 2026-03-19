@@ -3,119 +3,87 @@ name: Build Windows EXE
 on:
   push:
     branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
-  workflow_dispatch:
-
-# 显式声明所需权限
-permissions:
-  contents: write
-  actions: read
+  workflow_dispatch:  # 允许手动触发
 
 jobs:
   build-windows:
-    name: Build Windows Desktop App
     runs-on: windows-latest
-
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
+      
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.35.4'
           channel: 'stable'
-
+          cache: true
+      
       - name: Enable Windows desktop
         run: flutter config --enable-windows-desktop
-
-      - name: Install dependencies
+      
+      - name: Get dependencies
         run: flutter pub get
-
+      
       - name: Analyze code
-        run: flutter analyze --no-fatal-infos
+        run: flutter analyze
         continue-on-error: true
-
-      - name: Build Windows release
+      
+      - name: Build Windows Release
         run: flutter build windows --release
-
-      - name: Create zip archive
-        shell: pwsh
+      
+      - name: Package Windows build
+        shell: powershell
         run: |
-          $buildPath = "build\windows\x64\runner\Release"
-          $zipName = "ChannelCloner-Windows-x64.zip"
-          Compress-Archive -Path "$buildPath\*" -DestinationPath $zipName
-          Write-Host "Created: $zipName"
-          Get-Item $zipName | Select-Object Name, Length
-
-      - name: Upload artifact (always available)
+          $buildDir = "build\windows\x64\runner\Release"
+          $zipName = "ChannelCloner_Windows_v${{ github.run_number }}.zip"
+          Compress-Archive -Path "$buildDir\*" -DestinationPath $zipName
+          echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
+      
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ChannelCloner-Windows-x64
-          path: ChannelCloner-Windows-x64.zip
+          name: ChannelCloner-Windows
+          path: "*.zip"
           retention-days: 30
-
-      - name: Create Git tag
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        shell: pwsh
-        run: |
-          $tagName = "v1.0.${{ github.run_number }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag $tagName
-          git push origin $tagName
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        with:
+          tag_name: "v1.2.${{ github.run_number }}"
+          name: "Channel Cloner v1.2.${{ github.run_number }}"
+          body: |
+            ## 更新日志
+            
+            ### 🔧 核心修复
+            - **修复克隆任务转发失败**：公开频道自动通过 t.me/s/ 网页抓取真实消息ID，无需Bot读取历史消息权限
+            - **修复私有频道**：使用Bot API验证频道访问权限，提供清晰的错误提示和解决方案
+            - **详细错误诊断**：转发失败时显示Telegram真实错误代码和描述，而非模糊的"消息不存在"
+            - **连续权限错误自动停止**：避免无效的大量失败请求
+            
+            ### 🤖 AI文案润色改进
+            - **新增 Groq 免费AI**：速度极快，有免费额度（控制台注册获取Key）
+            - 支持模型：llama-3.1-8b-instant、llama3-70b-8192、gemma2-9b-it 等
+            - Pollinations AI 继续提供完全免费的润色服务
+            - OpenRouter 提供多个免费模型
+            
+            ### ✅ 仍支持的全部功能
+            - Bot账号：公开/私有频道无引用转发
+            - 用户API账号：安装Python+Telethon后读取任意频道（包括私有）
+            - 媒体组整组无引用转发
+            - AI文案润色（监听模式实时有效）
+            - 广告过滤、视频MD5修改
+            
+            ### 📥 下载安装
+            1. 下载下方 `ChannelCloner_Windows_*.zip`
+            2. 解压到任意目录
+            3. 运行 `channel_cloner.exe`
+            
+            > **私有频道读取增强**：安装 Python 3 + `pip install telethon` 可解锁用户API账号读取私有频道功能
+          files: "*.zip"
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create GitHub Release
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: ncipollo/release-action@v1
-        with:
-          tag: v1.0.${{ github.run_number }}
-          name: "Channel Cloner v1.0.${{ github.run_number }}"
-          body: |
-            ## Channel Cloner - Windows桌面版
-
-            ### 📥 安装说明
-            1. 下载 `ChannelCloner-Windows-x64.zip`
-            2. 解压到任意目录（推荐非C盘）
-            3. 双击运行 `channel_cloner.exe`
-
-            ### ✅ v1.3 核心修复
-            - ✅ **用户账号MTProto登录**：账号页面新增「登录」按钮，手机号+验证码完整登录流程
-            - ✅ **私有频道支持**：用户API账号通过MTProto可读取已加入的所有频道（公开+私有）
-            - ✅ **AI文案润色免费化**：内置Pollinations AI（完全免费，无需任何API Key，开启即用）
-            - ✅ **OpenRouter免费模型**：新增OpenRouter服务商，提供多款免费AI模型（注册即可免费使用）
-            - ✅ **AI润色改进**：修复了AI润色不生效的问题，免费服务商无需填写Key即可工作
-            - ✅ **用户账号登录状态显示**：账号卡片清晰展示MTProto授权状态
-
-            ### 📋 完整功能
-            - 无引用转发（不显示来源频道）
-            - 用户API账号MTProto模式（读取私有频道）
-            - 手机号验证码+两步验证完整登录
-            - Bot Token账号（简单配置，适合公开频道）
-            - 一对一 / 多对多频道克隆
-            - 多账号管理（Bot Token / 用户API+MTProto）
-            - 自由选择消息范围（起止消息ID）
-            - 24小时自动监听，新内容实时转发
-            - AI文案润色（Pollinations免费/OpenRouter免费/Gemini/DeepSeek等）
-            - 广告自动过滤 + 自定义关键词
-            - 内容类型过滤（图片/视频/文档/音频/贴纸）
-            - 媒体组整组转发（多图多视频保持一条）
-            - 视频MD5修改（防重复检测）
-            - 白色/深色主题切换
-            - 完整转发记录和运行日志
-
-            ### 🔧 用户账号使用说明
-            1. 在账号页面添加「用户API」账号，填写 API ID + API Hash
-            2. 点击账号卡片的「登录」按钮（手机图标）
-            3. 输入手机号，接收验证码，完成登录
-            4. 登录成功后可读取该账号加入的所有频道（包括私有频道）
-            
-            > 需要安装Python环境（Windows自带或从python.org下载）
-            > 首次使用会自动安装telethon库
-          artifacts: ChannelCloner-Windows-x64.zip
-          token: ${{ secrets.GITHUB_TOKEN }}
-          allowUpdates: true
-          makeLatest: true

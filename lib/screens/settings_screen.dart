@@ -33,6 +33,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
       'llamascout',       // Llama Scout（免费）
       'gemini',           // Gemini（免费）
     ],
+    // ===== Groq（极快速度，免费额度，注册获取Key）=====
+    'groq': [
+      'llama-3.1-8b-instant',   // 最快，推荐
+      'llama3-70b-8192',        // 高质量
+      'llama-3.3-70b-versatile',// 最新70B
+      'gemma2-9b-it',           // Google Gemma2
+      'mixtral-8x7b-32768',     // Mixtral
+    ],
     // ===== OpenRouter（有免费模型，需免费注册Key）=====
     'openrouter': [
       'meta-llama/llama-3.1-8b-instruct:free',
@@ -190,6 +198,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         Expanded(
                           child: Text(
                             '💡 推荐：Pollinations AI 完全免费，无需注册，直接开启即可使用文案润色！\n'
+                            'Groq 速度极快，有免费额度（注册后获取免费Key）\n'
                             'OpenRouter 也提供免费模型（注册后获取免费Key）',
                             style: TextStyle(color: Color(0xFF00E676), fontSize: 11),
                           ),
@@ -208,6 +217,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     children: _providerModels.keys.map((key) {
                       const labels = {
                         'pollinations': '🆓 Pollinations(免费)',
+                        'groq': '⚡ Groq(免费额度)',
                         'openrouter': '🆓 OpenRouter(免费模型)',
                         'openai': 'OpenAI',
                         'deepseek': 'DeepSeek',
@@ -444,7 +454,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final primary = Theme.of(context).colorScheme.primary;
     final isDark = Theme.of(context).brightness == Brightness.dark;
     // 免费服务商用特殊颜色标识
-    final isFree = value == 'pollinations' || value == 'openrouter';
+    final isFree = value == 'pollinations' || value == 'openrouter' || value == 'groq';
     final accentColor = isFree ? const Color(0xFF00E676) : primary;
     return InkWell(
       onTap: () {
@@ -686,6 +696,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return 'AIzaSyxxxxxxxxxxxxxxxxx';
       case 'openrouter':
         return 'sk-or-v1-xxxxxxxxxx (openrouter.ai 免费注册)';
+      case 'groq':
+        return 'gsk_xxxxxxxxxx (console.groq.com 免费注册)';
       default:
         return '输入您的API Key';
     }

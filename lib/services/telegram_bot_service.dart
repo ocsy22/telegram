@@ -49,6 +49,28 @@ class TelegramBotService {
     }
   }
 
+  /// 带错误详情的API调用，返回完整响应
+  Future<Map<String, dynamic>> _apiCallWithError(
+      String token, String method, Map<String, dynamic> params) async {
+    final url = 'https://api.telegram.org/bot$token/$method';
+    final client = _client();
+    try {
+      final resp = await client
+          .post(
+            Uri.parse(url),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(params),
+          )
+          .timeout(const Duration(seconds: 60));
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      return data;
+    } catch (e) {
+      return {'ok': false, 'description': '网络异常: $e', 'error_code': -1};
+    } finally {
+      client.close();
+    }
+  }
+
   /// 验证 Bot Token
   Future<BotInfo?> getMe(String token) async {
     if (token.isEmpty) return null;
@@ -98,8 +120,8 @@ class TelegramBotService {
     return [];
   }
 
-  /// copyMessage - 无引用转发单条消息
-  Future<int?> copyMessage({
+  /// copyMessage - 无引用转发单条消息（返回详细错误信息）
+  Future<CopyResult> copyMessageWithDetail({
     required String token,
     required String fromChatId,
     required String toChatId,
@@ -115,48 +137,61 @@ class TelegramBotService {
     };
     if (removeCaption) {
       params['caption'] = '';
-    } else if (caption != null) {
+    } else if (caption != null && caption.isNotEmpty) {
       params['caption'] = caption;
       params['parse_mode'] = parseMode;
     }
-    final client = _client();
-    try {
-      final url = 'https://api.telegram.org/bot$token/copyMessage';
-      final resp = await client
-          .post(
-            Uri.parse(url),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode(params),
-          )
-          .timeout(const Duration(seconds: 60));
-      if (resp.statusCode == 200) {
-        final data = jsonDecode(resp.body) as Map<String, dynamic>;
-        if (data['ok'] == true) {
-          final result = data['result'] as Map<String, dynamic>?;
-          return result?['message_id'] as int?;
-        }
-        if (kDebugMode) debugPrint('copyMessage failed: ${resp.body}');
-      }
-    } catch (e) {
-      if (kDebugMode) debugPrint('copyMessage exception: $e');
-    } finally {
-      client.close();
+
+    final data = await _apiCallWithError(token, 'copyMessage', params);
+    if (data['ok'] == true) {
+      final result = data['result'] as Map<String, dynamic>?;
+      final newId = result?['message_id'] as int?;
+      return CopyResult(success: true, newMessageId: newId);
     }
-    return null;
+
+    final errorCode = data['error_code'] as int? ?? 0;
+    final description = data['description'] as String? ?? '未知错误';
+    return CopyResult(
+      success: false,
+      errorCode: errorCode,
+      errorDescription: description,
+    );
   }
 
-  /// copyMessages - 无引用批量转发一组消息（保持 media_group 原样）
-  /// Bot API 7.0+ 支持 copyMessages 方法，一次性复制多条（保留原始分组）
-  Future<bool> copyMessages({
+  /// copyMessage - 无引用转发单条消息（兼容旧接口）
+  Future<int?> copyMessage({
+    required String token,
+    required String fromChatId,
+    required String toChatId,
+    required int messageId,
+    String? caption,
+    bool removeCaption = false,
+    String parseMode = 'HTML',
+  }) async {
+    final r = await copyMessageWithDetail(
+      token: token,
+      fromChatId: fromChatId,
+      toChatId: toChatId,
+      messageId: messageId,
+      caption: caption,
+      removeCaption: removeCaption,
+      parseMode: parseMode,
+    );
+    return r.success ? r.newMessageId : null;
+  }
+
+  /// copyMessages - 无引用批量转发，返回详细结果
+  Future<CopyMessagesResult> copyMessagesWithDetail({
     required String token,
     required String fromChatId,
     required String toChatId,
     required List<int> messageIds,
     bool removeCaption = false,
   }) async {
-    if (messageIds.isEmpty) return false;
+    if (messageIds.isEmpty) {
+      return CopyMessagesResult(success: false, errorDescription: '消息列表为空');
+    }
 
-    // Bot API 7.0+ 的 copyMessages（批量）
     final params = <String, dynamic>{
       'chat_id': toChatId,
       'from_chat_id': fromChatId,
@@ -177,68 +212,103 @@ class TelegramBotService {
           )
           .timeout(const Duration(seconds: 90));
 
-      if (resp.statusCode == 200) {
-        final data = jsonDecode(resp.body) as Map<String, dynamic>;
-        if (data['ok'] == true) return true;
-        if (kDebugMode) debugPrint('copyMessages failed: ${resp.body}');
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (data['ok'] == true) {
+        return CopyMessagesResult(success: true);
       }
 
-      // 降级：逐条用 copyMessage 发送
-      if (kDebugMode) debugPrint('copyMessages not supported, fallback to single copyMessage');
+      final errorCode = data['error_code'] as int? ?? 0;
+      final description = data['description'] as String? ?? '未知错误';
+
+      // 批量失败时，逐条尝试
       client.close();
-      bool anySuccess = false;
+      int successCount = 0;
+      final errors = <String>[];
       for (final mid in messageIds) {
-        final r = await copyMessage(
+        final r = await copyMessageWithDetail(
           token: token,
           fromChatId: fromChatId,
           toChatId: toChatId,
           messageId: mid,
           removeCaption: removeCaption,
         );
-        if (r != null) anySuccess = true;
+        if (r.success) {
+          successCount++;
+        } else {
+          errors.add('msg[$mid]: ${r.errorDescription}');
+        }
         await Future.delayed(const Duration(milliseconds: 300));
       }
-      return anySuccess;
+      return CopyMessagesResult(
+        success: successCount > 0,
+        successCount: successCount,
+        errorCode: errorCode,
+        errorDescription: successCount > 0
+            ? '批量API不支持，逐条转发: $successCount/${messageIds.length}成功'
+            : description,
+        singleErrors: errors,
+      );
     } catch (e) {
-      if (kDebugMode) debugPrint('copyMessages exception: $e');
-      // 降级
-      bool anySuccess = false;
+      client.close();
+      // 异常时逐条重试
+      int successCount = 0;
+      final errors = <String>[];
       for (final mid in messageIds) {
-        final r = await copyMessage(
+        final r = await copyMessageWithDetail(
           token: token,
           fromChatId: fromChatId,
           toChatId: toChatId,
           messageId: mid,
           removeCaption: removeCaption,
         );
-        if (r != null) anySuccess = true;
+        if (r.success) {
+          successCount++;
+        } else {
+          errors.add('msg[$mid]: ${r.errorDescription}');
+        }
         await Future.delayed(const Duration(milliseconds: 300));
       }
-      return anySuccess;
-    } finally {
-      client.close();
+      return CopyMessagesResult(
+        success: successCount > 0,
+        successCount: successCount,
+        errorDescription: successCount > 0
+            ? '网络异常后逐条重试: $successCount/${messageIds.length}成功'
+            : '网络异常: $e',
+        singleErrors: errors,
+      );
     }
   }
 
+  /// copyMessages - 无引用批量转发一组消息（兼容旧接口）
+  Future<bool> copyMessages({
+    required String token,
+    required String fromChatId,
+    required String toChatId,
+    required List<int> messageIds,
+    bool removeCaption = false,
+  }) async {
+    final r = await copyMessagesWithDetail(
+      token: token,
+      fromChatId: fromChatId,
+      toChatId: toChatId,
+      messageIds: messageIds,
+      removeCaption: removeCaption,
+    );
+    return r.success;
+  }
+
   /// 获取一批连续消息（含 media_group_id），用于分组检测
-  /// 返回原始消息列表（Bot API forwardMessages 里带 media_group_id 字段）
   Future<List<TgRawMessage>> getMessagesInfo(
       String token, String chatId, List<int> messageIds) async {
     return [];
   }
 
-  /// 获取文件信息（用于MD5修改功能）
-  /// 返回包含 file_path 的 Map，失败返回 null
+  /// 获取文件信息
   Future<Map<String, dynamic>?> getFileInfo({
     required String token,
     required String chatId,
     required int messageId,
   }) async {
-    // 先通过 forwardMessage 获取文件ID，再用 getFile 获取下载路径
-    // 实际上我们需要先获取消息的 file_id
-    // Bot API 没有直接获取历史消息的API（需要用户API）
-    // 这里通过 copyMessage 到 "bot 自身" 来获取文件信息（需要一个临时频道）
-    // 简化：返回 null 以跳过 MD5 修改，使用标注模式
     return null;
   }
 
@@ -310,6 +380,56 @@ class TelegramBotService {
     }
     return null;
   }
+}
+
+// ==================== 结果数据类 ====================
+
+class CopyResult {
+  final bool success;
+  final int? newMessageId;
+  final int errorCode;
+  final String? errorDescription;
+
+  CopyResult({
+    required this.success,
+    this.newMessageId,
+    this.errorCode = 0,
+    this.errorDescription,
+  });
+
+  /// 是否是"消息不存在"错误（通常意味着Bot没有访问权限）
+  bool get isNotFound =>
+      errorCode == 400 &&
+      (errorDescription?.contains('message to copy not found') == true ||
+          errorDescription?.contains('MESSAGE_ID_INVALID') == true);
+
+  /// 是否是权限错误
+  bool get isPermissionError =>
+      errorCode == 400 &&
+      (errorDescription?.contains('CHANNEL_PRIVATE') == true ||
+          errorDescription?.contains('chat not found') == true ||
+          errorDescription?.contains('bot is not a member') == true ||
+          errorDescription?.contains('Not Found') == true);
+
+  /// 是否是限流错误
+  bool get isRateLimited =>
+      errorCode == 429;
+}
+
+class CopyMessagesResult {
+  final bool success;
+  final int successCount;
+  final int errorCode;
+  final String? errorDescription;
+  final List<String> singleErrors;
+
+  CopyMessagesResult({
+    required this.success,
+    this.successCount = 0,
+    this.errorCode = 0,
+    this.errorDescription,
+    this.singleErrors = const [],
+  });
 }
 
 // ==================== 数据类 ====================

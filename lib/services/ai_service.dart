@@ -8,6 +8,7 @@ import '../models/app_models.dart';
 /// AI 润色/改写服务
 /// 支持多家 AI 服务商：
 ///   - Pollinations AI（免费，无需Key，直接可用）
+///   - Groq（免费额度，注册获取Key，速度极快）
 ///   - OpenRouter（有免费模型，需注册Key）
 ///   - Gemini（需Key，有免费额度）
 ///   - OpenAI/DeepSeek/通义千问/智谱GLM/Kimi（需付费Key）
@@ -38,6 +39,13 @@ class AiService {
         return _callPollinations(
           systemPrompt: systemPrompt,
           prompt: prompt,
+          maxTokens: maxTokens,
+          temperature: temperature,
+        );
+      case 'groq':
+        return _callGroq(
+          prompt: prompt,
+          systemPrompt: systemPrompt,
           maxTokens: maxTokens,
           temperature: temperature,
         );
@@ -120,6 +128,57 @@ class AiService {
       }
     } catch (e) {
       if (kDebugMode) debugPrint('Pollinations exception: $e');
+    } finally {
+      client.close();
+    }
+    return null;
+  }
+
+  // ===== Groq API（免费额度，速度极快）=====
+  /// Groq: https://console.groq.com/keys
+  /// 免费模型：llama-3.1-8b-instant, llama3-70b-8192, gemma2-9b-it, mixtral-8x7b-32768
+  Future<String?> _callGroq({
+    required String prompt,
+    required String systemPrompt,
+    int maxTokens = 500,
+    double temperature = 0.8,
+  }) async {
+    final model = config.model.isNotEmpty ? config.model : 'llama-3.1-8b-instant';
+    final client = _client();
+    try {
+      final resp = await client
+          .post(
+            Uri.parse('https://api.groq.com/openai/v1/chat/completions'),
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer ${config.apiKey}',
+            },
+            body: jsonEncode({
+              'model': model,
+              'messages': [
+                {'role': 'system', 'content': systemPrompt},
+                {'role': 'user', 'content': prompt},
+              ],
+              'max_tokens': maxTokens,
+              'temperature': temperature,
+            }),
+          )
+          .timeout(const Duration(seconds: 30));
+      if (resp.statusCode == 200) {
+        final data = jsonDecode(resp.body) as Map<String, dynamic>;
+        final choices = data['choices'] as List?;
+        if (choices != null && choices.isNotEmpty) {
+          final msg = choices[0]['message'] as Map<String, dynamic>?;
+          return (msg?['content'] as String?)?.trim();
+        }
+      } else {
+        if (kDebugMode) {
+          debugPrint('Groq error ${resp.statusCode}: '
+              '${resp.body.substring(0, resp.body.length.clamp(0, 200))}');
+        }
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('Groq exception: $e');
     } finally {
       client.close();
     }
@@ -368,6 +427,15 @@ ${prompt != null && prompt.isNotEmpty ? "7. 额外要求：$prompt" : ""}''';
 
   /// 测试 AI 连接
   Future<bool> testConnection() async {
+    if (config.provider == 'groq') {
+      final result = await _callGroq(
+        prompt: '请只回复数字"1"',
+        systemPrompt: '你是一个AI助手。',
+        maxTokens: 10,
+        temperature: 0.1,
+      );
+      return result != null && result.isNotEmpty;
+    }
     if (config.provider == 'pollinations') {
       final result = await _callPollinations(
         systemPrompt: '你是一个AI助手。',
