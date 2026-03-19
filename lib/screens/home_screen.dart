@@ -136,7 +136,11 @@ class HomeScreen extends StatelessWidget {
                     children: [
                       IconTheme(
                         data: IconThemeData(
-                          color: selected ? primary : Colors.white38,
+                          color: selected
+                              ? primary
+                              : (Theme.of(context).brightness == Brightness.dark
+                                  ? Colors.white38
+                                  : Colors.black38),
                           size: 22,
                         ),
                         child: selected
@@ -146,7 +150,11 @@ class HomeScreen extends StatelessWidget {
                       const SizedBox(height: 3),
                       DefaultTextStyle(
                         style: TextStyle(
-                          color: selected ? primary : Colors.white38,
+                          color: selected
+                              ? primary
+                              : (Theme.of(context).brightness == Brightness.dark
+                                  ? Colors.white38
+                                  : Colors.black38),
                           fontSize: 10,
                         ),
                         child: item.label,

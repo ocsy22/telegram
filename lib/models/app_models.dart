@@ -105,9 +105,16 @@ class CloneTask {
   bool aiRewrite;         // AI 改写文案
   String aiPrompt;        // AI 改写提示词
 
+  // AI 润色（轻度修改，避免内容完全一致）
+  bool aiPolish;          // 开启AI润色
+  int aiPolishStyle;      // 润色风格：0=轻度 1=中度 2=重度
+
   // 广告过滤
   bool filterAds;         // 开启广告过滤
   String adKeywords;      // 自定义过滤关键词（每行一个）
+
+  // 视频MD5修改
+  bool modifyVideoMd5;    // 转发时随机修改视频MD5（防重复检测）
 
   // 监听选项
   int monitorIntervalSec; // 监听轮询间隔（秒）
@@ -150,8 +157,11 @@ class CloneTask {
     this.removeForwardTag = true,
     this.aiRewrite = false,
     this.aiPrompt = '',
+    this.aiPolish = false,
+    this.aiPolishStyle = 0,
     this.filterAds = false,
     this.adKeywords = '',
+    this.modifyVideoMd5 = false,
     this.monitorIntervalSec = 15,
     this.delayMin = 1,
     this.delayMax = 5,
@@ -191,8 +201,11 @@ class CloneTask {
     'removeForwardTag': removeForwardTag,
     'aiRewrite': aiRewrite,
     'aiPrompt': aiPrompt,
+    'aiPolish': aiPolish,
+    'aiPolishStyle': aiPolishStyle,
     'filterAds': filterAds,
     'adKeywords': adKeywords,
+    'modifyVideoMd5': modifyVideoMd5,
     'monitorIntervalSec': monitorIntervalSec,
     'delayMin': delayMin,
     'delayMax': delayMax,
@@ -227,8 +240,11 @@ class CloneTask {
       removeForwardTag: j['removeForwardTag'] ?? true,
       aiRewrite: j['aiRewrite'] ?? false,
       aiPrompt: j['aiPrompt'] ?? '',
+      aiPolish: j['aiPolish'] ?? false,
+      aiPolishStyle: j['aiPolishStyle'] ?? 0,
       filterAds: j['filterAds'] ?? false,
       adKeywords: j['adKeywords'] ?? '',
+      modifyVideoMd5: j['modifyVideoMd5'] ?? false,
       monitorIntervalSec: j['monitorIntervalSec'] ?? 15,
       delayMin: j['delayMin'] ?? 1,
       delayMax: j['delayMax'] ?? 5,
@@ -239,7 +255,7 @@ class CloneTask {
 
 // ==================== AiConfig ====================
 class AiConfig {
-  String provider;     // openai / deepseek / qianwen / zhipu / moonshot / custom
+  String provider;     // openai / deepseek / qianwen / zhipu / moonshot / gemini / custom
   String apiKey;
   String model;
   String baseUrl;      // 自定义API地址
@@ -254,13 +270,14 @@ class AiConfig {
   });
 
   String get effectiveBaseUrl {
-    if (provider == 'custom' && baseUrl.isNotEmpty) return baseUrl;
+    if (baseUrl.isNotEmpty && provider != 'gemini') return baseUrl;
     switch (provider) {
       case 'openai':   return 'https://api.openai.com/v1';
       case 'deepseek': return 'https://api.deepseek.com/v1';
       case 'qianwen':  return 'https://dashscope.aliyuncs.com/compatible-mode/v1';
       case 'zhipu':    return 'https://open.bigmodel.cn/api/paas/v4';
       case 'moonshot': return 'https://api.moonshot.cn/v1';
+      case 'gemini':   return 'https://generativelanguage.googleapis.com/v1beta';
       default:         return 'https://api.openai.com/v1';
     }
   }
@@ -271,6 +288,7 @@ class AiConfig {
       case 'qianwen':  return 'qwen-turbo';
       case 'zhipu':    return 'glm-4-flash';
       case 'moonshot': return 'moonshot-v1-8k';
+      case 'gemini':   return 'gemini-2.0-flash-exp';
       default:         return 'gpt-3.5-turbo';
     }
   }
@@ -312,12 +330,14 @@ class AppSettings {
   AiConfig aiConfig;
   int globalDelayMin;
   int globalDelayMax;
+  bool lightTheme;   // 白色/浅色主题
 
   AppSettings({
     this.ignoreSsl = true,
     AiConfig? aiConfig,
     this.globalDelayMin = 1,
     this.globalDelayMax = 5,
+    this.lightTheme = false,
   }) : aiConfig = aiConfig ?? AiConfig();
 
   Map<String, dynamic> toJson() => {
@@ -325,6 +345,7 @@ class AppSettings {
     'aiConfig': aiConfig.toJson(),
     'globalDelayMin': globalDelayMin,
     'globalDelayMax': globalDelayMax,
+    'lightTheme': lightTheme,
   };
 
   factory AppSettings.fromJson(Map<String, dynamic> j) => AppSettings(
@@ -334,6 +355,7 @@ class AppSettings {
         : AiConfig(),
     globalDelayMin: j['globalDelayMin'] ?? 1,
     globalDelayMax: j['globalDelayMax'] ?? 5,
+    lightTheme: j['lightTheme'] ?? false,
   );
 
   AppSettings copyWith({
@@ -341,11 +363,13 @@ class AppSettings {
     AiConfig? aiConfig,
     int? globalDelayMin,
     int? globalDelayMax,
+    bool? lightTheme,
   }) => AppSettings(
     ignoreSsl: ignoreSsl ?? this.ignoreSsl,
     aiConfig: aiConfig ?? this.aiConfig,
     globalDelayMin: globalDelayMin ?? this.globalDelayMin,
     globalDelayMax: globalDelayMax ?? this.globalDelayMax,
+    lightTheme: lightTheme ?? this.lightTheme,
   );
 }
 

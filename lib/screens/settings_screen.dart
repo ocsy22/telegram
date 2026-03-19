@@ -118,6 +118,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 _section('通用设置', Icons.settings_rounded, [
                   _toggleRow(
                     context,
+                    '白色主题',
+                    '切换为白色/浅色界面风格',
+                    settings.lightTheme,
+                    (v) => provider.updateSettings(settings.copyWith(lightTheme: v)),
+                  ),
+                  const Divider(),
+                  _toggleRow(
+                    context,
                     '忽略SSL证书错误',
                     '绕过SSL验证，解决网络连接问题（推荐开启）',
                     settings.ignoreSsl,
@@ -254,7 +262,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
                 // ===== 关于 =====
                 _section('关于', Icons.info_outline_rounded, [
-                  _infoRow('版本', 'v1.1.0'),
+                  _infoRow('版本', 'v1.2.0'),
                   _infoRow('名称', 'Channel Cloner'),
                   _infoRow('描述', 'Telegram频道克隆工具，无引用转发、媒体组、AI改写'),
                   const SizedBox(height: 12),
@@ -301,7 +309,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
 
     return DropdownButtonFormField<String>(
-      value: dropdownValue,
+      initialValue: dropdownValue,
       decoration: InputDecoration(
         hintText: '选择模型',
         helperText: '推荐: ${settings.aiConfig.defaultModel}',
@@ -310,8 +318,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       items: models
           .map((m) => DropdownMenuItem(
                 value: m,
-                child: Text(m,
-                    style: const TextStyle(fontSize: 13, color: Colors.white)),
+                child: Text(m, style: const TextStyle(fontSize: 13)),
               ))
           .toList(),
       onChanged: (v) {
@@ -363,6 +370,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _toggleRow(BuildContext context, String label, String subtitle,
       bool value, ValueChanged<bool> onChanged) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
@@ -376,8 +384,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         fontWeight: FontWeight.w600, fontSize: 14)),
                 if (subtitle.isNotEmpty)
                   Text(subtitle,
-                      style:
-                          const TextStyle(color: Colors.white54, fontSize: 12)),
+                      style: TextStyle(
+                          color: isDark ? Colors.white54 : Colors.black45,
+                          fontSize: 12)),
               ],
             ),
           ),
@@ -389,6 +398,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _delayRow(
       BuildContext context, AppSettings settings, AppProvider provider) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
@@ -402,8 +412,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 Text(
                     '任务每条消息之间的等待时间 '
                     '${settings.globalDelayMin}~${settings.globalDelayMax}秒',
-                    style:
-                        const TextStyle(color: Colors.white54, fontSize: 12)),
+                    style: TextStyle(
+                        color: isDark ? Colors.white54 : Colors.black45,
+                        fontSize: 12)),
               ],
             ),
           ),
@@ -462,6 +473,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _infoRow(String label, String value) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
@@ -469,8 +481,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           SizedBox(
               width: 60,
               child: Text(label,
-                  style: const TextStyle(
-                      color: Colors.white38, fontSize: 13))),
+                  style: TextStyle(
+                      color: isDark ? Colors.white38 : Colors.black38,
+                      fontSize: 13))),
           Expanded(child: Text(value, style: const TextStyle(fontSize: 13))),
         ],
       ),
@@ -524,8 +537,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _Feature('✅ 自由选择消息范围（起止ID）'),
           _Feature('✅ 24小时自动监听，实时转发新内容'),
           _Feature('✅ 广告过滤 - 自动跳过含链接/联系方式消息'),
-          _Feature('✅ AI文案改写（支持6家AI服务商）'),
+          _Feature('✅ AI文案润色/改写（支持6家AI服务商）'),
           _Feature('✅ 内容类型过滤（图片/视频/文档等）'),
+          _Feature('✅ 视频MD5修改（防重复检测）'),
+          _Feature('✅ 白色/深色主题切换'),
           _Feature('✅ 转发记录和运行日志'),
         ],
       ),
@@ -650,10 +665,13 @@ class _Feature extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2),
-      child:
-          Text(text, style: const TextStyle(fontSize: 12, color: Colors.white70)),
+      child: Text(text,
+          style: TextStyle(
+              fontSize: 12,
+              color: isDark ? Colors.white70 : Colors.black54)),
     );
   }
 }

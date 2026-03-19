@@ -38,6 +38,7 @@ class TasksScreen extends StatelessWidget {
   }
 
   Widget _buildEmpty(BuildContext context, AppProvider provider) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -58,7 +59,8 @@ class TasksScreen extends StatelessWidget {
           const SizedBox(height: 20),
           const Text('还没有创建任务', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
           const SizedBox(height: 8),
-          const Text('新建一个克隆任务开始搬运内容', style: TextStyle(color: Colors.white54)),
+          Text('新建一个克隆任务开始搬运内容',
+              style: TextStyle(color: isDark ? Colors.white54 : Colors.black45)),
           const SizedBox(height: 24),
           ElevatedButton.icon(
             onPressed: () => _showCreateDialog(context, provider),
@@ -163,6 +165,7 @@ class _TaskListItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final primary = Theme.of(context).colorScheme.primary;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     final isRunning = task.status == TaskStatus.running;
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
@@ -205,7 +208,7 @@ class _TaskListItem extends StatelessWidget {
                         ),
                         Text(
                           task.mode == TaskMode.clone ? '克隆模式' : '监听模式',
-                          style: const TextStyle(color: Colors.white54, fontSize: 11),
+                          style: TextStyle(color: isDark ? Colors.white54 : Colors.black45, fontSize: 11),
                         ),
                       ],
                     ),
@@ -239,7 +242,7 @@ class _TaskListItem extends StatelessWidget {
                   Expanded(
                     child: Text(
                       '${task.sourceChannels.length}源 → ${task.targetChannels.length}目标',
-                      style: const TextStyle(color: Colors.white38, fontSize: 11),
+                      style: TextStyle(color: isDark ? Colors.white38 : Colors.black38, fontSize: 11),
                     ),
                   ),
                   if (isRunning)
@@ -317,6 +320,7 @@ class _TaskSummaryPanel extends StatelessWidget {
     final running = provider.tasks.where((t) => t.status == TaskStatus.running).length;
     final completed = provider.tasks.where((t) => t.status == TaskStatus.completed).length;
     final totalRecords = provider.records.length;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
 
     return Padding(
       padding: const EdgeInsets.all(20),
@@ -343,7 +347,8 @@ class _TaskSummaryPanel extends StatelessWidget {
             Center(
               child: Padding(
                 padding: const EdgeInsets.all(30),
-                child: Text('暂无转发记录', style: TextStyle(color: Colors.white38)),
+                child: Text('暂无转发记录',
+                    style: TextStyle(color: isDark ? Colors.white38 : Colors.black38)),
               ),
             )
           else
@@ -369,6 +374,7 @@ class _RecordItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Container(
       margin: const EdgeInsets.only(bottom: 6),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -378,7 +384,8 @@ class _RecordItem extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Icon(_mediaIcon(record.mediaType), size: 16, color: Colors.white54),
+          Icon(_mediaIcon(record.mediaType), size: 16,
+              color: isDark ? Colors.white54 : Colors.black45),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
@@ -400,7 +407,7 @@ class _RecordItem extends StatelessWidget {
           const SizedBox(width: 8),
           Text(
             _formatTime(record.transferredAt),
-            style: const TextStyle(color: Colors.white38, fontSize: 11),
+            style: TextStyle(color: isDark ? Colors.white38 : Colors.black38, fontSize: 11),
           ),
         ],
       ),
@@ -464,7 +471,10 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
   late int _delayMax;
   late bool _removeCaption;
   late bool _aiRewrite;
+  late bool _aiPolish;
+  late int _aiPolishStyle;
   late bool _filterAds;
+  late bool _modifyVideoMd5;
   late bool _includeText;
   late bool _includePhoto;
   late bool _includeVideo;
@@ -489,7 +499,10 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
     _delayMax = widget.task.delayMax;
     _removeCaption = widget.task.removeCaption;
     _aiRewrite = widget.task.aiRewrite;
+    _aiPolish = widget.task.aiPolish;
+    _aiPolishStyle = widget.task.aiPolishStyle;
     _filterAds = widget.task.filterAds;
+    _modifyVideoMd5 = widget.task.modifyVideoMd5;
     _includeText = widget.task.includeText;
     _includePhoto = widget.task.includePhoto;
     _includeVideo = widget.task.includeVideo;
@@ -514,11 +527,12 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
     return Dialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       child: SizedBox(
-        width: 620,
-        height: 580,
+        width: 640,
+        height: 620,
         child: Column(
           children: [
             Padding(
@@ -546,10 +560,10 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
                 tabs: const [
                   Tab(text: '基本配置'),
                   Tab(text: '内容过滤'),
-                  Tab(text: 'AI改写'),
+                  Tab(text: 'AI功能'),
                 ],
                 labelColor: theme.colorScheme.primary,
-                unselectedLabelColor: Colors.white54,
+                unselectedLabelColor: isDark ? Colors.white54 : Colors.black45,
                 indicatorColor: theme.colorScheme.primary,
                 dividerColor: Colors.transparent,
               ),
@@ -587,6 +601,7 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
 
   Widget _buildBasicTab() {
     final accounts = widget.provider.accounts;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return SingleChildScrollView(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
       child: Column(
@@ -600,7 +615,8 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
           // 模式选择
           Row(
             children: [
-              const Text('任务模式：', style: TextStyle(color: Colors.white70)),
+              Text('任务模式：',
+                  style: TextStyle(color: isDark ? Colors.white70 : Colors.black54)),
               const SizedBox(width: 12),
               _ModeChip(
                 label: '克隆模式',
@@ -618,12 +634,31 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
             ],
           ),
           const SizedBox(height: 16),
-          // 账号选择
+          // 账号选择 - ★★★ 修复：支持Bot和API账号 ★★★
           if (accounts.isNotEmpty) ...[
-            _buildAccountDropdown('发送账号（Bot Token）', _srcAccountId, (v) {
-              setState(() => _srcAccountId = v);
-              _tgtAccountId = v; // 同账号即可用于接收
-            }, accounts),
+            _buildAllAccountDropdown(accounts),
+            const SizedBox(height: 12),
+          ] else ...[
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFAB00).withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFFFFAB00).withValues(alpha: 0.25)),
+              ),
+              child: const Row(
+                children: [
+                  Icon(Icons.warning_amber_rounded, color: Color(0xFFFFAB00), size: 18),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '请先在「账号」页面添加Bot账号或用户账号',
+                      style: TextStyle(color: Color(0xFFFFAB00), fontSize: 13),
+                    ),
+                  ),
+                ],
+              ),
+            ),
             const SizedBox(height: 12),
           ],
           // 来源频道
@@ -667,7 +702,8 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
           ],
           if (_mode == TaskMode.monitor) ...[
             _sectionLabel('监听设置'),
-            _slider('轮询间隔', _monitorInterval.toDouble(), 5, 300, (v) => setState(() => _monitorInterval = v.round()),
+            _slider('轮询间隔', _monitorInterval.toDouble(), 5, 300,
+                (v) => setState(() => _monitorInterval = v.round()),
                 unit: '秒'),
           ],
           const SizedBox(height: 12),
@@ -681,18 +717,130 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
           ),
           const SizedBox(height: 12),
           _toggleRow('去除原始文案', _removeCaption, (v) => setState(() => _removeCaption = v)),
+          _toggleRow('转发时修改视频MD5（防重复检测）', _modifyVideoMd5,
+              (v) => setState(() => _modifyVideoMd5 = v)),
         ],
       ),
     );
   }
 
+  // ★★★ 修复：账号下拉显示所有账号（Bot + 用户API）★★★
+  Widget _buildAllAccountDropdown(List<TelegramAccount> accounts) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    // 所有账号都可以作为发送账号（Bot用token，userApi用session/proxy转发）
+    final allAccounts = accounts.toList();
+    if (allAccounts.isEmpty) return const SizedBox.shrink();
+
+    // 检查当前选中的账号是否在列表中
+    String? current = allAccounts.any((a) => a.id == _srcAccountId) ? _srcAccountId : null;
+    // 如果没有选中，默认选第一个Bot账号
+    if (current == null) {
+      final firstBot = allAccounts.where((a) => a.type == AccountType.bot).firstOrNull;
+      current = firstBot?.id ?? allAccounts.first.id;
+      _srcAccountId = current;
+      _tgtAccountId = current;
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        DropdownButtonFormField<String>(
+          initialValue: current,
+          decoration: const InputDecoration(
+            labelText: '发送账号',
+            helperText: '支持Bot Token账号和已登录的用户账号',
+          ),
+          items: allAccounts.map((a) {
+            final icon = a.type == AccountType.bot
+                ? Icons.smart_toy_rounded
+                : Icons.person_rounded;
+            final typeLabel = a.type == AccountType.bot ? '[Bot]' : '[用户]';
+            final statusColor = a.status == AccountStatus.connected
+                ? const Color(0xFF00E676)
+                : const Color(0xFFFF5252);
+            return DropdownMenuItem<String>(
+              value: a.id,
+              child: Row(
+                children: [
+                  Icon(icon, size: 16, color: Theme.of(context).colorScheme.primary),
+                  const SizedBox(width: 6),
+                  Text(
+                    '${a.name.isNotEmpty ? a.name : (a.username ?? a.id)} $typeLabel',
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                  const SizedBox(width: 6),
+                  Container(
+                    width: 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      color: statusColor,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }).toList(),
+          onChanged: (v) {
+            if (v != null) {
+              setState(() {
+                _srcAccountId = v;
+                _tgtAccountId = v;
+              });
+            }
+          },
+          dropdownColor: Theme.of(context).colorScheme.surface,
+        ),
+        // 显示账号类型说明
+        if (_srcAccountId.isNotEmpty)
+          Builder(builder: (context) {
+            final selectedAcc = allAccounts.where((a) => a.id == _srcAccountId).firstOrNull;
+            if (selectedAcc == null) return const SizedBox.shrink();
+            if (selectedAcc.type == AccountType.userApi) {
+              return Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF00B4D8).withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xFF00B4D8).withValues(alpha: 0.25)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.info_outline_rounded,
+                          color: Color(0xFF00B4D8), size: 15),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          '用户API账号：可以访问非公开频道，适合克隆他人频道。'
+                          '${selectedAcc.status == AccountStatus.connected ? ' ✅已连接' : ' ⚠️请先在账号页面验证'}',
+                          style: TextStyle(
+                            color: isDark ? Colors.white60 : Colors.black54,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }
+            return const SizedBox.shrink();
+          }),
+      ],
+    );
+  }
+
   Widget _buildFilterTab() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return SingleChildScrollView(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('选择要转发的内容类型', style: TextStyle(color: Colors.white54, fontSize: 13)),
+          Text('选择要转发的内容类型',
+              style: TextStyle(color: isDark ? Colors.white54 : Colors.black45, fontSize: 13)),
           const SizedBox(height: 16),
           _toggleRow('文字消息', _includeText, (v) => setState(() => _includeText = v)),
           _toggleRow('图片', _includePhoto, (v) => setState(() => _includePhoto = v)),
@@ -710,9 +858,9 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
             ],
           ),
           const SizedBox(height: 6),
-          const Text(
+          Text(
             '自动跳过含链接、@用户名、招募/推广词的消息',
-            style: TextStyle(color: Colors.white54, fontSize: 12),
+            style: TextStyle(color: isDark ? Colors.white54 : Colors.black45, fontSize: 12),
           ),
           const SizedBox(height: 8),
           _toggleRow('启用广告过滤', _filterAds, (v) => setState(() => _filterAds = v)),
@@ -735,15 +883,27 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(color: const Color(0xFFFF5252).withValues(alpha: 0.2)),
               ),
-              child: const Column(
+              child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('内置过滤规则（已包含）：', style: TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.w600)),
-                  SizedBox(height: 4),
-                  Text('• 含 t.me/ 或 telegram.me/ 链接', style: TextStyle(color: Colors.white38, fontSize: 11)),
-                  Text('• 含 http:// / https:// 链接', style: TextStyle(color: Colors.white38, fontSize: 11)),
-                  Text('• 含 @用户名（5字符以上）', style: TextStyle(color: Colors.white38, fontSize: 11)),
-                  Text('• 含招募/加群/推广等广告词', style: TextStyle(color: Colors.white38, fontSize: 11)),
+                  Text('内置过滤规则（已包含）：',
+                      style: TextStyle(
+                          color: isDark ? Colors.white54 : Colors.black45,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 4),
+                  Text('• 含 t.me/ 或 telegram.me/ 链接',
+                      style: TextStyle(
+                          color: isDark ? Colors.white38 : Colors.black38, fontSize: 11)),
+                  Text('• 含 http:// / https:// 链接',
+                      style: TextStyle(
+                          color: isDark ? Colors.white38 : Colors.black38, fontSize: 11)),
+                  Text('• 含 @用户名（5字符以上）',
+                      style: TextStyle(
+                          color: isDark ? Colors.white38 : Colors.black38, fontSize: 11)),
+                  Text('• 含招募/加群/推广等广告词',
+                      style: TextStyle(
+                          color: isDark ? Colors.white38 : Colors.black38, fontSize: 11)),
                 ],
               ),
             ),
@@ -756,6 +916,8 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
   Widget _buildAiTab() {
     final aiEnabled = widget.provider.settings.aiConfig.enabled &&
         widget.provider.settings.aiConfig.apiKey.isNotEmpty;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
     return SingleChildScrollView(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
       child: Column(
@@ -783,7 +945,87 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
               ),
             ),
           const SizedBox(height: 16),
-          _toggleRow('AI改写文案', _aiRewrite, (v) => setState(() => _aiRewrite = v)),
+
+          // ===== AI 润色功能（轻度修改，保持原意）=====
+          Row(
+            children: [
+              const Icon(Icons.auto_fix_high_rounded, size: 16, color: Color(0xFF00E5FF)),
+              const SizedBox(width: 6),
+              const Text('AI 文案润色', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '轻度修改原文案，避免与原文完全一致，保持内容相似度',
+            style: TextStyle(color: isDark ? Colors.white54 : Colors.black45, fontSize: 12),
+          ),
+          const SizedBox(height: 8),
+          _toggleRow('启用AI润色', _aiPolish, (v) => setState(() => _aiPolish = v)),
+          if (_aiPolish) ...[
+            const SizedBox(height: 10),
+            Text('润色强度：',
+                style: TextStyle(
+                    color: isDark ? Colors.white70 : Colors.black54, fontSize: 13)),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                _PolishChip(
+                  label: '轻度',
+                  subtitle: '改5-20%',
+                  selected: _aiPolishStyle == 0,
+                  onTap: () => setState(() => _aiPolishStyle = 0),
+                ),
+                const SizedBox(width: 8),
+                _PolishChip(
+                  label: '中度',
+                  subtitle: '改30-50%',
+                  selected: _aiPolishStyle == 1,
+                  onTap: () => setState(() => _aiPolishStyle = 1),
+                ),
+                const SizedBox(width: 8),
+                _PolishChip(
+                  label: '重度',
+                  subtitle: '完全改写',
+                  selected: _aiPolishStyle == 2,
+                  onTap: () => setState(() => _aiPolishStyle = 2),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: const Color(0xFF00E5FF).withValues(alpha: 0.06),
+                borderRadius: BorderRadius.circular(8),
+                border:
+                    Border.all(color: const Color(0xFF00E5FF).withValues(alpha: 0.2)),
+              ),
+              child: Text(
+                '💡 润色会对每条消息的文案进行微调，包含18+成人内容的文案也会被处理。'
+                '使用Gemini免费API可无需付费。',
+                style:
+                    TextStyle(color: isDark ? Colors.white54 : Colors.black54, fontSize: 11),
+              ),
+            ),
+          ],
+
+          const Divider(height: 28),
+
+          // ===== AI 改写功能（大幅修改）=====
+          Row(
+            children: [
+              const Icon(Icons.auto_awesome_rounded, size: 16, color: Color(0xFF6C63FF)),
+              const SizedBox(width: 6),
+              const Text('AI 完整改写', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '完全重写文案内容，保留主题但改变表达方式',
+            style: TextStyle(color: isDark ? Colors.white54 : Colors.black45, fontSize: 12),
+          ),
+          const SizedBox(height: 8),
+          _toggleRow('启用AI改写', _aiRewrite, (v) => setState(() => _aiRewrite = v)),
           if (_aiRewrite) ...[
             const SizedBox(height: 12),
             TextField(
@@ -800,27 +1042,14 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
     );
   }
 
-  Widget _buildAccountDropdown(String label, String value, Function(String) onChanged,
-      List<TelegramAccount> accounts) {
-    final botAccounts = accounts.where((a) => a.type == AccountType.bot).toList();
-    if (botAccounts.isEmpty) return const SizedBox.shrink();
-    String? current = botAccounts.any((a) => a.id == value) ? value : null;
-    return DropdownButtonFormField<String>(
-      value: current,
-      decoration: InputDecoration(labelText: label),
-      items: botAccounts.map((a) => DropdownMenuItem(
-        value: a.id,
-        child: Text(a.name.isNotEmpty ? a.name : a.username ?? a.id),
-      )).toList(),
-      onChanged: (v) { if (v != null) onChanged(v); },
-      dropdownColor: Theme.of(context).colorScheme.surface,
-    );
-  }
-
   Widget _sectionLabel(String text) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
-      child: Text(text, style: TextStyle(color: Theme.of(context).colorScheme.primary, fontWeight: FontWeight.w600, fontSize: 13)),
+      child: Text(text,
+          style: TextStyle(
+              color: Theme.of(context).colorScheme.primary,
+              fontWeight: FontWeight.w600,
+              fontSize: 13)),
     );
   }
 
@@ -836,14 +1065,18 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
     );
   }
 
-  Widget _slider(String label, double value, double min, double max, ValueChanged<double> onChanged, {String unit = ''}) {
+  Widget _slider(String label, double value, double min, double max,
+      ValueChanged<double> onChanged, {String unit = ''}) {
     return Row(
       children: [
         Text(label, style: const TextStyle(fontSize: 13)),
         Expanded(
           child: Slider(value: value, min: min, max: max, onChanged: onChanged),
         ),
-        Text('${value.round()}$unit', style: TextStyle(color: Theme.of(context).colorScheme.primary, fontWeight: FontWeight.bold)),
+        Text('${value.round()}$unit',
+            style: TextStyle(
+                color: Theme.of(context).colorScheme.primary,
+                fontWeight: FontWeight.bold)),
       ],
     );
   }
@@ -860,8 +1093,10 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
 
   void _save() {
     widget.task.name = _nameCtrl.text.trim();
-    widget.task.sourceChannels = _srcCtrl.text.split('\n').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
-    widget.task.targetChannels = _tgtCtrl.text.split('\n').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+    widget.task.sourceChannels =
+        _srcCtrl.text.split('\n').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+    widget.task.targetChannels =
+        _tgtCtrl.text.split('\n').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
     widget.task.mode = _mode;
     widget.task.transferMode = _transferMode;
     widget.task.startMessageId = _startId;
@@ -873,8 +1108,11 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
     widget.task.removeCaption = _removeCaption;
     widget.task.aiRewrite = _aiRewrite;
     widget.task.aiPrompt = _promptCtrl.text.trim();
+    widget.task.aiPolish = _aiPolish;
+    widget.task.aiPolishStyle = _aiPolishStyle;
     widget.task.filterAds = _filterAds;
     widget.task.adKeywords = _adKeywordsCtrl.text.trim();
+    widget.task.modifyVideoMd5 = _modifyVideoMd5;
     widget.task.includeText = _includeText;
     widget.task.includePhoto = _includePhoto;
     widget.task.includeVideo = _includeVideo;
@@ -888,17 +1126,64 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
   }
 }
 
+// ===== 润色强度选择器 =====
+class _PolishChip extends StatelessWidget {
+  final String label;
+  final String subtitle;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _PolishChip({
+    required this.label,
+    required this.subtitle,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const color = Color(0xFF00E5FF);
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        decoration: BoxDecoration(
+          color: selected ? color.withValues(alpha: 0.15) : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: selected ? color : Colors.white24),
+        ),
+        child: Column(
+          children: [
+            Text(label,
+                style: TextStyle(
+                    color: selected ? color : Colors.white54,
+                    fontSize: 13,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.normal)),
+            Text(subtitle,
+                style: TextStyle(
+                    color: selected ? color.withValues(alpha: 0.7) : Colors.white38,
+                    fontSize: 10)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _ModeChip extends StatelessWidget {
   final String label;
   final IconData icon;
   final bool selected;
   final VoidCallback onTap;
 
-  const _ModeChip({required this.label, required this.icon, required this.selected, required this.onTap});
+  const _ModeChip(
+      {required this.label, required this.icon, required this.selected, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
     final primary = Theme.of(context).colorScheme.primary;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(10),
@@ -912,9 +1197,15 @@ class _ModeChip extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 15, color: selected ? primary : Colors.white54),
+            Icon(icon, size: 15, color: selected ? primary : (isDark ? Colors.white54 : Colors.black45)),
             const SizedBox(width: 5),
-            Text(label, style: TextStyle(color: selected ? primary : Colors.white54, fontSize: 13, fontWeight: selected ? FontWeight.w600 : FontWeight.normal)),
+            Text(label,
+                style: TextStyle(
+                    color: selected
+                        ? primary
+                        : (isDark ? Colors.white54 : Colors.black45),
+                    fontSize: 13,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.normal)),
           ],
         ),
       ),

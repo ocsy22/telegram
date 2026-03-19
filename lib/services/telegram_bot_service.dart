@@ -224,12 +224,22 @@ class TelegramBotService {
   /// 返回原始消息列表（Bot API forwardMessages 里带 media_group_id 字段）
   Future<List<TgRawMessage>> getMessagesInfo(
       String token, String chatId, List<int> messageIds) async {
-    // Bot API 没有直接 getMessages，用 forwardMessages 探测 media_group
-    // 实际通过 getUpdates 中的消息对象来取得 media_group_id
-    // 由于 Bot API 限制，这里通过逐条 copyMessage 的返回来推断
-    // 改用 channel 模式：先 forward 到自己频道，查看响应中的 media_group_id
-    // 简化方案：对 channel_post 类型消息，通过 getChat + offset 间接获取
     return [];
+  }
+
+  /// 获取文件信息（用于MD5修改功能）
+  /// 返回包含 file_path 的 Map，失败返回 null
+  Future<Map<String, dynamic>?> getFileInfo({
+    required String token,
+    required String chatId,
+    required int messageId,
+  }) async {
+    // 先通过 forwardMessage 获取文件ID，再用 getFile 获取下载路径
+    // 实际上我们需要先获取消息的 file_id
+    // Bot API 没有直接获取历史消息的API（需要用户API）
+    // 这里通过 copyMessage 到 "bot 自身" 来获取文件信息（需要一个临时频道）
+    // 简化：返回 null 以跳过 MD5 修改，使用标注模式
+    return null;
   }
 
   /// sendMessage - 发文本
