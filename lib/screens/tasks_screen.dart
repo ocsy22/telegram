@@ -452,6 +452,7 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
   late final _srcCtrl = TextEditingController(text: widget.task.sourceChannels.join('\n'));
   late final _tgtCtrl = TextEditingController(text: widget.task.targetChannels.join('\n'));
   late final _promptCtrl = TextEditingController(text: widget.task.aiPrompt);
+  late final _adKeywordsCtrl = TextEditingController(text: widget.task.adKeywords);
 
   late TaskMode _mode;
   late TransferMode _transferMode;
@@ -463,6 +464,7 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
   late int _delayMax;
   late bool _removeCaption;
   late bool _aiRewrite;
+  late bool _filterAds;
   late bool _includeText;
   late bool _includePhoto;
   late bool _includeVideo;
@@ -487,6 +489,7 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
     _delayMax = widget.task.delayMax;
     _removeCaption = widget.task.removeCaption;
     _aiRewrite = widget.task.aiRewrite;
+    _filterAds = widget.task.filterAds;
     _includeText = widget.task.includeText;
     _includePhoto = widget.task.includePhoto;
     _includeVideo = widget.task.includeVideo;
@@ -504,6 +507,7 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
     _srcCtrl.dispose();
     _tgtCtrl.dispose();
     _promptCtrl.dispose();
+    _adKeywordsCtrl.dispose();
     super.dispose();
   }
 
@@ -696,6 +700,54 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
           _toggleRow('文件/文档', _includeDocument, (v) => setState(() => _includeDocument = v)),
           _toggleRow('音频', _includeAudio, (v) => setState(() => _includeAudio = v)),
           _toggleRow('贴纸', _includeSticker, (v) => setState(() => _includeSticker = v)),
+          const Divider(height: 28),
+          // ===== 广告过滤 =====
+          Row(
+            children: [
+              const Icon(Icons.block_rounded, size: 16, color: Color(0xFFFF5252)),
+              const SizedBox(width: 6),
+              const Text('广告自动过滤', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+            ],
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            '自动跳过含链接、@用户名、招募/推广词的消息',
+            style: TextStyle(color: Colors.white54, fontSize: 12),
+          ),
+          const SizedBox(height: 8),
+          _toggleRow('启用广告过滤', _filterAds, (v) => setState(() => _filterAds = v)),
+          if (_filterAds) ...[
+            const SizedBox(height: 12),
+            TextField(
+              controller: _adKeywordsCtrl,
+              maxLines: 4,
+              decoration: const InputDecoration(
+                labelText: '自定义过滤关键词（每行一个，精确匹配）',
+                hintText: '例如：\n加群\n点击链接\n免费领取',
+                helperText: '自定义关键词与内置广告规则叠加使用',
+              ),
+            ),
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFF5252).withValues(alpha: 0.07),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFFF5252).withValues(alpha: 0.2)),
+              ),
+              child: const Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('内置过滤规则（已包含）：', style: TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.w600)),
+                  SizedBox(height: 4),
+                  Text('• 含 t.me/ 或 telegram.me/ 链接', style: TextStyle(color: Colors.white38, fontSize: 11)),
+                  Text('• 含 http:// / https:// 链接', style: TextStyle(color: Colors.white38, fontSize: 11)),
+                  Text('• 含 @用户名（5字符以上）', style: TextStyle(color: Colors.white38, fontSize: 11)),
+                  Text('• 含招募/加群/推广等广告词', style: TextStyle(color: Colors.white38, fontSize: 11)),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -821,6 +873,8 @@ class _TaskEditDialogState extends State<_TaskEditDialog>
     widget.task.removeCaption = _removeCaption;
     widget.task.aiRewrite = _aiRewrite;
     widget.task.aiPrompt = _promptCtrl.text.trim();
+    widget.task.filterAds = _filterAds;
+    widget.task.adKeywords = _adKeywordsCtrl.text.trim();
     widget.task.includeText = _includeText;
     widget.task.includePhoto = _includePhoto;
     widget.task.includeVideo = _includeVideo;

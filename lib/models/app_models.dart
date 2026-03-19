@@ -105,6 +105,10 @@ class CloneTask {
   bool aiRewrite;         // AI 改写文案
   String aiPrompt;        // AI 改写提示词
 
+  // 广告过滤
+  bool filterAds;         // 开启广告过滤
+  String adKeywords;      // 自定义过滤关键词（每行一个）
+
   // 监听选项
   int monitorIntervalSec; // 监听轮询间隔（秒）
 
@@ -146,6 +150,8 @@ class CloneTask {
     this.removeForwardTag = true,
     this.aiRewrite = false,
     this.aiPrompt = '',
+    this.filterAds = false,
+    this.adKeywords = '',
     this.monitorIntervalSec = 15,
     this.delayMin = 1,
     this.delayMax = 5,
@@ -185,6 +191,8 @@ class CloneTask {
     'removeForwardTag': removeForwardTag,
     'aiRewrite': aiRewrite,
     'aiPrompt': aiPrompt,
+    'filterAds': filterAds,
+    'adKeywords': adKeywords,
     'monitorIntervalSec': monitorIntervalSec,
     'delayMin': delayMin,
     'delayMax': delayMax,
@@ -219,6 +227,8 @@ class CloneTask {
       removeForwardTag: j['removeForwardTag'] ?? true,
       aiRewrite: j['aiRewrite'] ?? false,
       aiPrompt: j['aiPrompt'] ?? '',
+      filterAds: j['filterAds'] ?? false,
+      adKeywords: j['adKeywords'] ?? '',
       monitorIntervalSec: j['monitorIntervalSec'] ?? 15,
       delayMin: j['delayMin'] ?? 1,
       delayMax: j['delayMax'] ?? 5,
@@ -280,6 +290,20 @@ class AiConfig {
     baseUrl: j['baseUrl'] ?? '',
     enabled: j['enabled'] ?? false,
   );
+
+  AiConfig copyWith({
+    String? provider,
+    String? apiKey,
+    String? model,
+    String? baseUrl,
+    bool? enabled,
+  }) => AiConfig(
+    provider: provider ?? this.provider,
+    apiKey: apiKey ?? this.apiKey,
+    model: model ?? this.model,
+    baseUrl: baseUrl ?? this.baseUrl,
+    enabled: enabled ?? this.enabled,
+  );
 }
 
 // ==================== AppSettings ====================
@@ -310,6 +334,18 @@ class AppSettings {
         : AiConfig(),
     globalDelayMin: j['globalDelayMin'] ?? 1,
     globalDelayMax: j['globalDelayMax'] ?? 5,
+  );
+
+  AppSettings copyWith({
+    bool? ignoreSsl,
+    AiConfig? aiConfig,
+    int? globalDelayMin,
+    int? globalDelayMax,
+  }) => AppSettings(
+    ignoreSsl: ignoreSsl ?? this.ignoreSsl,
+    aiConfig: aiConfig ?? this.aiConfig,
+    globalDelayMin: globalDelayMin ?? this.globalDelayMin,
+    globalDelayMax: globalDelayMax ?? this.globalDelayMax,
   );
 }
 

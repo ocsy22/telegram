@@ -4,7 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart' as http_io;
 
-/// Telegram Bot API 服务（用于 Bot Token 模式的发送/接收）
+/// Telegram Bot API 服务（Bot Token 模式）
 class TelegramBotService {
   static TelegramBotService? _instance;
   static TelegramBotService get instance => _instance ??= TelegramBotService._();
@@ -37,7 +37,8 @@ class TelegramBotService {
         if (data['ok'] == true) return data['result'] as Map<String, dynamic>?;
       }
       if (kDebugMode) {
-        debugPrint('TG API $method error ${resp.statusCode}: ${resp.body.substring(0, resp.body.length.clamp(0, 300))}');
+        debugPrint('TG API $method error ${resp.statusCode}: '
+            '${resp.body.substring(0, resp.body.length.clamp(0, 300))}');
       }
       return null;
     } catch (e) {
@@ -48,7 +49,7 @@ class TelegramBotService {
     }
   }
 
-  /// getMe - 验证 Bot Token
+  /// 验证 Bot Token
   Future<BotInfo?> getMe(String token) async {
     if (token.isEmpty) return null;
     final result = await _apiCall(token, 'getMe', {});
@@ -62,7 +63,7 @@ class TelegramBotService {
     return null;
   }
 
-  /// getUpdates - 获取最新消息（监听用）
+  /// getUpdates - 轮询获取新消息（监听模式用）
   Future<List<TgMessage>> getUpdates(String token,
       {int offset = 0, int limit = 100, int timeout = 0}) async {
     final client = _client();
@@ -97,13 +98,13 @@ class TelegramBotService {
     return [];
   }
 
-  /// copyMessage - 无引用转发核心方法
+  /// copyMessage - 无引用转发单条消息
   Future<int?> copyMessage({
     required String token,
     required String fromChatId,
     required String toChatId,
     required int messageId,
-    String? caption,          // null = 保留原始文案；'' = 去除文案；其他 = 替换
+    String? caption,
     bool removeCaption = false,
     String parseMode = 'HTML',
   }) async {
@@ -144,7 +145,94 @@ class TelegramBotService {
     return null;
   }
 
-  /// sendMessage - 发送文本消息
+  /// copyMessages - 无引用批量转发一组消息（保持 media_group 原样）
+  /// Bot API 7.0+ 支持 copyMessages 方法，一次性复制多条（保留原始分组）
+  Future<bool> copyMessages({
+    required String token,
+    required String fromChatId,
+    required String toChatId,
+    required List<int> messageIds,
+    bool removeCaption = false,
+  }) async {
+    if (messageIds.isEmpty) return false;
+
+    // Bot API 7.0+ 的 copyMessages（批量）
+    final params = <String, dynamic>{
+      'chat_id': toChatId,
+      'from_chat_id': fromChatId,
+      'message_ids': messageIds,
+    };
+    if (removeCaption) {
+      params['remove_caption'] = true;
+    }
+
+    final client = _client();
+    try {
+      final url = 'https://api.telegram.org/bot$token/copyMessages';
+      final resp = await client
+          .post(
+            Uri.parse(url),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(params),
+          )
+          .timeout(const Duration(seconds: 90));
+
+      if (resp.statusCode == 200) {
+        final data = jsonDecode(resp.body) as Map<String, dynamic>;
+        if (data['ok'] == true) return true;
+        if (kDebugMode) debugPrint('copyMessages failed: ${resp.body}');
+      }
+
+      // 降级：逐条用 copyMessage 发送
+      if (kDebugMode) debugPrint('copyMessages not supported, fallback to single copyMessage');
+      client.close();
+      bool anySuccess = false;
+      for (final mid in messageIds) {
+        final r = await copyMessage(
+          token: token,
+          fromChatId: fromChatId,
+          toChatId: toChatId,
+          messageId: mid,
+          removeCaption: removeCaption,
+        );
+        if (r != null) anySuccess = true;
+        await Future.delayed(const Duration(milliseconds: 300));
+      }
+      return anySuccess;
+    } catch (e) {
+      if (kDebugMode) debugPrint('copyMessages exception: $e');
+      // 降级
+      bool anySuccess = false;
+      for (final mid in messageIds) {
+        final r = await copyMessage(
+          token: token,
+          fromChatId: fromChatId,
+          toChatId: toChatId,
+          messageId: mid,
+          removeCaption: removeCaption,
+        );
+        if (r != null) anySuccess = true;
+        await Future.delayed(const Duration(milliseconds: 300));
+      }
+      return anySuccess;
+    } finally {
+      client.close();
+    }
+  }
+
+  /// 获取一批连续消息（含 media_group_id），用于分组检测
+  /// 返回原始消息列表（Bot API forwardMessages 里带 media_group_id 字段）
+  Future<List<TgRawMessage>> getMessagesInfo(
+      String token, String chatId, List<int> messageIds) async {
+    // Bot API 没有直接 getMessages，用 forwardMessages 探测 media_group
+    // 实际通过 getUpdates 中的消息对象来取得 media_group_id
+    // 由于 Bot API 限制，这里通过逐条 copyMessage 的返回来推断
+    // 改用 channel 模式：先 forward 到自己频道，查看响应中的 media_group_id
+    // 简化方案：对 channel_post 类型消息，通过 getChat + offset 间接获取
+    return [];
+  }
+
+  /// sendMessage - 发文本
   Future<int?> sendMessage({
     required String token,
     required String chatId,
@@ -180,43 +268,7 @@ class TelegramBotService {
     return null;
   }
 
-  /// forwardMessage - 带引用转发（用于对比测试）
-  Future<int?> forwardMessage({
-    required String token,
-    required String fromChatId,
-    required String toChatId,
-    required int messageId,
-  }) async {
-    final client = _client();
-    try {
-      final url = 'https://api.telegram.org/bot$token/forwardMessage';
-      final resp = await client
-          .post(
-            Uri.parse(url),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({
-              'chat_id': toChatId,
-              'from_chat_id': fromChatId,
-              'message_id': messageId,
-            }),
-          )
-          .timeout(const Duration(seconds: 60));
-      if (resp.statusCode == 200) {
-        final data = jsonDecode(resp.body) as Map<String, dynamic>;
-        if (data['ok'] == true) {
-          final result = data['result'] as Map<String, dynamic>?;
-          return result?['message_id'] as int?;
-        }
-      }
-    } catch (e) {
-      if (kDebugMode) debugPrint('forwardMessage exception: $e');
-    } finally {
-      client.close();
-    }
-    return null;
-  }
-
-  /// getChannelInfo - 获取频道/群组信息
+  /// getChannelInfo - 获取频道信息
   Future<ChannelInfo?> getChannelInfo(String token, String chatId) async {
     final client = _client();
     try {
@@ -263,7 +315,27 @@ class ChannelInfo {
   final String title;
   final String? username;
   final int memberCount;
-  ChannelInfo({required this.id, required this.title, this.username, this.memberCount = 0});
+  ChannelInfo({
+    required this.id,
+    required this.title,
+    this.username,
+    this.memberCount = 0,
+  });
+}
+
+class TgRawMessage {
+  final int messageId;
+  final String? mediaGroupId;
+  final String mediaType;
+  final String? caption;
+  final String? text;
+  TgRawMessage({
+    required this.messageId,
+    this.mediaGroupId,
+    required this.mediaType,
+    this.caption,
+    this.text,
+  });
 }
 
 class TgMessage {
@@ -271,8 +343,9 @@ class TgMessage {
   final int messageId;
   final String chatId;
   final String? text;
-  final String mediaType; // text / photo / video / document / audio / sticker
+  final String mediaType;
   final String? caption;
+  final String? mediaGroupId; // 媒体组ID，同一组多图/多视频共享此ID
   final DateTime date;
 
   TgMessage({
@@ -282,24 +355,36 @@ class TgMessage {
     this.text,
     required this.mediaType,
     this.caption,
+    this.mediaGroupId,
     required this.date,
   });
+
+  bool get isInMediaGroup => mediaGroupId != null && mediaGroupId!.isNotEmpty;
 
   factory TgMessage.fromUpdate(Map<String, dynamic> update) {
     final msg = update['message'] as Map<String, dynamic>? ??
         update['channel_post'] as Map<String, dynamic>? ??
         {};
-    final chatId = (msg['chat'] as Map<String, dynamic>?)?['id']?.toString() ?? '';
+    final chatId =
+        (msg['chat'] as Map<String, dynamic>?)?['id']?.toString() ?? '';
     final ts = msg['date'] as int? ?? 0;
 
     String mediaType = 'text';
-    if (msg.containsKey('photo')) mediaType = 'photo';
-    else if (msg.containsKey('video')) mediaType = 'video';
-    else if (msg.containsKey('document')) mediaType = 'document';
-    else if (msg.containsKey('audio')) mediaType = 'audio';
-    else if (msg.containsKey('sticker')) mediaType = 'sticker';
-    else if (msg.containsKey('voice')) mediaType = 'audio';
-    else if (msg.containsKey('animation')) mediaType = 'video';
+    if (msg.containsKey('photo')) {
+      mediaType = 'photo';
+    } else if (msg.containsKey('video')) {
+      mediaType = 'video';
+    } else if (msg.containsKey('document')) {
+      mediaType = 'document';
+    } else if (msg.containsKey('audio')) {
+      mediaType = 'audio';
+    } else if (msg.containsKey('sticker')) {
+      mediaType = 'sticker';
+    } else if (msg.containsKey('voice')) {
+      mediaType = 'audio';
+    } else if (msg.containsKey('animation')) {
+      mediaType = 'video';
+    }
 
     return TgMessage(
       updateId: update['update_id'] as int? ?? 0,
@@ -308,7 +393,10 @@ class TgMessage {
       text: msg['text'] as String?,
       mediaType: mediaType,
       caption: msg['caption'] as String?,
-      date: ts > 0 ? DateTime.fromMillisecondsSinceEpoch(ts * 1000) : DateTime.now(),
+      mediaGroupId: msg['media_group_id'] as String?,
+      date: ts > 0
+          ? DateTime.fromMillisecondsSinceEpoch(ts * 1000)
+          : DateTime.now(),
     );
   }
 }

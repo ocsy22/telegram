@@ -246,15 +246,14 @@ class _AccountCard extends StatelessWidget {
             // 操作按钮
             Column(
               children: [
-                if (account.type == AccountType.bot)
-                  IconButton(
-                    onPressed: onTest,
-                    icon: const Icon(Icons.wifi_tethering_rounded, size: 20),
-                    tooltip: '测试连接',
-                    style: IconButton.styleFrom(
-                      foregroundColor: const Color(0xFF00E5FF),
-                    ),
+                IconButton(
+                  onPressed: onTest,
+                  icon: const Icon(Icons.wifi_tethering_rounded, size: 20),
+                  tooltip: account.type == AccountType.bot ? '测试Bot连接' : '验证API配置',
+                  style: IconButton.styleFrom(
+                    foregroundColor: const Color(0xFF00E5FF),
                   ),
+                ),
                 IconButton(
                   onPressed: onEdit,
                   icon: const Icon(Icons.edit_outlined, size: 20),
@@ -367,7 +366,7 @@ class _AccountDialogState extends State<_AccountDialog> {
                 _field('API Hash', _apiHashCtrl, hint: '从 my.telegram.org 获取'),
                 const SizedBox(height: 8),
                 const Text(
-                  '⚠️ 用户API模式目前仅供配置，完整功能需在Windows本机运行',
+                  '⚠️ 用户API模式：配置 API ID + API Hash 后点击验证按钮',
                   style: TextStyle(color: Color(0xFFFFAB00), fontSize: 12),
                 ),
               ],
