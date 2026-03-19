@@ -615,6 +615,12 @@ class AppProvider extends ChangeNotifier {
     TelegramBotService.instance.setIgnoreSsl(settings.ignoreSsl);
     TelegramApiService.instance.setIgnoreSsl(settings.ignoreSsl);
 
+    // MTProto模式的 startId/endId：只有用户明确设置时才传（0表示不限制）
+    // 避免把 startMessageId=0 转成 start=1 导致Python端执行 [1..N] 的大范围拉取
+    final int startId = task.startMessageId > 0 ? task.startMessageId : 0;
+    final int endId = task.endMessageId > 0 ? task.endMessageId : 0;
+
+    // Bot API 模式仍然需要 start/end 计算（逻辑不变）
     final int start = task.startMessageId > 0 ? task.startMessageId : 1;
     final int end = task.endMessageId > 0
         ? task.endMessageId
@@ -637,7 +643,7 @@ class AppProvider extends ChangeNotifier {
       addLog('▶️ 使用MTProto用户账号克隆（可访问私有频道）',
           level: LogLevel.info, taskId: task.id);
       await _runCloneTaskWithTelethon(
-          task, account, runner, sources, targets, start, end, idx);
+          task, account, runner, sources, targets, startId, endId, idx);
       return;
     }
 
