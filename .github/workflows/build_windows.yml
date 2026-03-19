@@ -7,6 +7,11 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+# 显式声明所需权限
+permissions:
+  contents: write
+  actions: read
+
 jobs:
   build-windows:
     name: Build Windows Desktop App
@@ -41,41 +46,52 @@ jobs:
           $buildPath = "build\windows\x64\runner\Release"
           $zipName = "ChannelCloner-Windows-x64.zip"
           Compress-Archive -Path "$buildPath\*" -DestinationPath $zipName
-          echo "Created: $zipName"
-          ls $zipName
+          Write-Host "Created: $zipName"
+          Get-Item $zipName | Select-Object Name, Length
 
-      - name: Upload Windows artifact
+      - name: Upload artifact (always available)
         uses: actions/upload-artifact@v4
         with:
           name: ChannelCloner-Windows-x64
           path: ChannelCloner-Windows-x64.zip
           retention-days: 30
 
-      - name: Create Release (on push to main)
+      - name: Create Git tag
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: "Channel Cloner v1.0.${{ github.run_number }}"
-          body: |
-            ## Channel Cloner - Windows版本
-
-            ### 功能特性
-            - ✅ 无引用转发（不显示来源频道）
-            - ✅ 一对一 / 多对多频道克隆
-            - ✅ 多账号管理（Bot Token / 用户API）
-            - ✅ 自由选择消息范围（起止ID）
-            - ✅ 24小时自动监听任务
-            - ✅ AI文案改写（支持OpenAI/DeepSeek/通义千问/智谱GLM/Kimi/自定义）
-            - ✅ 内容类型过滤
-            - ✅ 转发记录和运行日志
-
-            ### 安装说明
-            1. 下载 `ChannelCloner-Windows-x64.zip`
-            2. 解压到任意目录
-            3. 运行 `channel_cloner.exe`
-          files: ChannelCloner-Windows-x64.zip
-          draft: false
-          prerelease: false
+        shell: pwsh
+        run: |
+          $tagName = "v1.0.${{ github.run_number }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag $tagName
+          git push origin $tagName
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub Release
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: ncipollo/release-action@v1
+        with:
+          tag: v1.0.${{ github.run_number }}
+          name: "Channel Cloner v1.0.${{ github.run_number }}"
+          body: |
+            ## Channel Cloner - Windows桌面版
+
+            ### 📥 安装说明
+            1. 下载 `ChannelCloner-Windows-x64.zip`
+            2. 解压到任意目录（推荐非C盘）
+            3. 双击运行 `channel_cloner.exe`
+
+            ### ✅ 功能特性
+            - 无引用转发（不显示来源频道）
+            - 一对一 / 多对多频道克隆
+            - 多账号管理（Bot Token / 用户API）
+            - 自由选择消息范围（起止消息ID）
+            - 24小时自动监听，新内容实时转发
+            - AI文案改写（OpenAI / DeepSeek / 通义千问 / 智谱GLM / Kimi / 自定义）
+            - 内容类型过滤（图片/视频/文档/音频/贴纸）
+            - 完整转发记录和运行日志
+          artifacts: ChannelCloner-Windows-x64.zip
+          token: ${{ secrets.GITHUB_TOKEN }}
+          allowUpdates: true
+          makeLatest: true
