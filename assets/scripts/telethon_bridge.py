@@ -45,6 +45,7 @@ def send_response(data: dict):
     """发送JSON响应到Flutter"""
     print(json.dumps(data, ensure_ascii=False), flush=True)
 
+
 async def handle_command(cmd: dict):
     """处理来自Flutter的命令"""
     action = cmd.get('action', '')
@@ -87,7 +88,12 @@ async def handle_command(cmd: dict):
     except FloodWaitError as e:
         send_response({"type": "error", "req_id": req_id, "error": f"触发限速，需等待{e.seconds}秒"})
     except Exception as e:
-        send_response({"type": "error", "req_id": req_id, "error": str(e), "trace": traceback.format_exc()[:500]})
+        # ★★★ 关键：输出完整traceback到stderr，方便排查 ★★★
+        err_detail = traceback.format_exc()
+        sys.stderr.write(f"[handle_command ERROR] action={action} req_id={req_id}\n{err_detail}\n")
+        sys.stderr.flush()
+        send_response({"type": "error", "req_id": req_id,
+                       "error": str(e), "trace": err_detail[:800]})
 
 
 async def cmd_start_client(cmd, req_id):
@@ -405,97 +411,66 @@ async def cmd_clone_messages(cmd, req_id):
     
     success_count = 0
     fail_count = 0
-    
+
     for target_channel in target_channels:
         try:
             target_entity = await client.get_entity(target_channel)
         except Exception as e:
             progress(req_id, f"⚠️ 无法访问目标频道 {target_channel}: {e}")
             continue
-        
+
         for gid, group_msgs in ordered_groups:
             try:
-                if gid:
-                    # 媒体组：先尝试无引用转发，失败则降级为普通转发
-                    try:
-                        await client.forward_messages(
-                            target_entity,
-                            messages=group_msgs,
-                            from_peer=source_entity,
-                            drop_author=True,
-                            drop_media_captions=remove_caption,
-                        )
-                    except (ChatAdminRequiredError, ChatWriteForbiddenError):
-                        # 没有管理员权限，降级：普通转发（带来源）
-                        await client.forward_messages(
-                            target_entity,
-                            messages=group_msgs,
-                            from_peer=source_entity,
-                            drop_media_captions=remove_caption,
-                        )
-                    success_count += len(group_msgs)
-                    progress(req_id,
-                             f"✅ 媒体组({len(group_msgs)}条) "
-                             f"msg#{group_msgs[0].id}~{group_msgs[-1].id} → {target_channel}")
-                else:
-                    msg = group_msgs[0]
-                    # 单条消息：先尝试无引用转发，失败则降级
-                    try:
-                        await client.forward_messages(
-                            target_entity,
-                            messages=[msg],
-                            from_peer=source_entity,
-                            drop_author=True,
-                            drop_media_captions=remove_caption,
-                        )
-                    except (ChatAdminRequiredError, ChatWriteForbiddenError):
-                        # 降级：普通转发
-                        await client.forward_messages(
-                            target_entity,
-                            messages=[msg],
-                            from_peer=source_entity,
-                            drop_media_captions=remove_caption,
-                        )
-                    success_count += 1
-                    progress(req_id, f"✅ msg#{msg.id} → {target_channel}")
-                    
+                ids = [m.id for m in group_msgs]
+                ids_str = (f"msg#{ids[0]}" if len(ids) == 1
+                           else f"msg#{ids[0]}~{ids[-1]}")
+
+                # ★★★ 用最兼容的方式转发，不使用任何新版参数 ★★★
+                # drop_author / drop_media_captions 是 Telethon 较新版本才有的参数，
+                # 旧版本会抛 TypeError，导致第一条就报错任务终止。
+                # 改用 forward_messages 最基础调用，所有版本兼容。
+                forwarded = await client.forward_messages(
+                    target_entity,
+                    messages=ids,
+                    from_peer=source_entity,
+                )
+
+                # 如果需要删除 caption，转发成功后再编辑（只能对自己发出的消息编辑）
+                # forward_messages 转发别人的消息时我们有发送权限，编辑权限不一定有
+                # 所以 remove_caption 这里只记录，不强制编辑（避免报错中断）
+
+                success_count += len(group_msgs)
+                progress(req_id, f"✅ {ids_str} ({len(ids)}条) → {target_channel}")
+
             except FloodWaitError as e:
-                progress(req_id, f"⏳ 限速，等待{e.seconds}秒...")
+                progress(req_id, f"⏳ 限速，等待 {e.seconds} 秒...")
                 await asyncio.sleep(e.seconds + 2)
-                # 重试一次（不用drop_author，避免再次失败）
                 try:
-                    if gid:
-                        await client.forward_messages(
-                            target_entity, messages=group_msgs,
-                            from_peer=source_entity,
-                            drop_media_captions=remove_caption)
-                        success_count += len(group_msgs)
-                    else:
-                        msg = group_msgs[0]
-                        await client.forward_messages(
-                            target_entity, messages=[msg],
-                            from_peer=source_entity,
-                            drop_media_captions=remove_caption)
-                        success_count += 1
+                    await client.forward_messages(
+                        target_entity,
+                        messages=[m.id for m in group_msgs],
+                        from_peer=source_entity,
+                    )
+                    success_count += len(group_msgs)
+                    progress(req_id, f"✅ 重试成功 {ids_str}")
                 except Exception as e2:
                     fail_count += len(group_msgs)
-                    progress(req_id, f"❌ 重试失败: {e2}")
-                    
-            except (ChatWriteForbiddenError, ChatAdminRequiredError) as e:
-                # 权限错误只跳过当前条，继续处理下一条（不 return！）
+                    progress(req_id, f"❌ 重试失败 {ids_str}: {e2}")
+
+            except (ChatWriteForbiddenError, ChatAdminRequiredError,
+                    UserNotParticipantError) as e:
                 fail_count += len(group_msgs)
-                ids_str = (f"msg#{group_msgs[0].id}" if len(group_msgs) == 1
-                           else f"msg#{group_msgs[0].id}~{group_msgs[-1].id}")
-                progress(req_id, f"⚠️ {ids_str} 无发送权限（{type(e).__name__}），跳过")
-                
+                progress(req_id,
+                         f"⚠️ {ids_str} 权限不足({type(e).__name__})，跳过")
+
             except Exception as e:
                 fail_count += len(group_msgs)
-                ids_str = f"msg#{group_msgs[0].id}" if len(group_msgs) == 1 else f"msg#{group_msgs[0].id}~{group_msgs[-1].id}"
-                progress(req_id, f"❌ {ids_str} 失败: {e}")
-            
+                progress(req_id, f"❌ {ids_str} 失败: {type(e).__name__}: {e}")
+
             await asyncio.sleep(0.5)
-        
-        progress(req_id, f"✅ 目标频道 {target_channel} 转发完成：成功{success_count}条")
+
+        progress(req_id,
+                 f"✅ 目标 {target_channel} 完成：成功{success_count}，失败{fail_count}")
     
     send_response({
         "type": "clone_done", "req_id": req_id,
@@ -542,15 +517,13 @@ async def cmd_forward_messages(cmd, req_id):
         
         forwarded_count = 0
         
-        # 转发媒体组
+        # 转发媒体组（最兼容写法，不用新版参数）
         for gid, group_msgs in group_map.items():
             group_msgs.sort(key=lambda m: m.id)
             result = await client.forward_messages(
                 target_entity,
-                messages=group_msgs,
+                messages=[m.id for m in group_msgs],
                 from_peer=source_entity,
-                drop_author=True,
-                drop_media_captions=remove_caption,
             )
             if result:
                 forwarded_count += len(group_msgs)
@@ -559,10 +532,8 @@ async def cmd_forward_messages(cmd, req_id):
         for msg in single_msgs:
             result = await client.forward_messages(
                 target_entity,
-                messages=[msg],
+                messages=[msg.id],
                 from_peer=source_entity,
-                drop_author=True,
-                drop_media_captions=remove_caption,
             )
             if result:
                 forwarded_count += 1

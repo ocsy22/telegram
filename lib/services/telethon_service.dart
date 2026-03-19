@@ -68,7 +68,15 @@ class TelethonService {
           .transform(const Utf8Decoder())
           .transform(const LineSplitter())
           .listen((line) {
-        if (line.isNotEmpty) debugPrint('[Telethon STDERR] $line');
+        if (line.isNotEmpty) {
+          debugPrint('[Telethon STDERR] $line');
+          // 把Python stderr也广播出去，让UI日志能显示Python内部错误
+          _eventController.add({
+            'type': 'progress',
+            'req_id': '__stderr__',
+            'msg': '[Python] $line',
+          });
+        }
       });
 
       // 6. 等待ready信号（最多10秒）
