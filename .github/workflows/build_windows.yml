@@ -1,0 +1,81 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    name: Build Windows Desktop App
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.4'
+          channel: 'stable'
+
+      - name: Enable Windows desktop
+        run: flutter config --enable-windows-desktop
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze code
+        run: flutter analyze --no-fatal-infos
+        continue-on-error: true
+
+      - name: Build Windows release
+        run: flutter build windows --release
+
+      - name: Create zip archive
+        shell: pwsh
+        run: |
+          $buildPath = "build\windows\x64\runner\Release"
+          $zipName = "ChannelCloner-Windows-x64.zip"
+          Compress-Archive -Path "$buildPath\*" -DestinationPath $zipName
+          echo "Created: $zipName"
+          ls $zipName
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChannelCloner-Windows-x64
+          path: ChannelCloner-Windows-x64.zip
+          retention-days: 30
+
+      - name: Create Release (on push to main)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: "Channel Cloner v1.0.${{ github.run_number }}"
+          body: |
+            ## Channel Cloner - Windows版本
+
+            ### 功能特性
+            - ✅ 无引用转发（不显示来源频道）
+            - ✅ 一对一 / 多对多频道克隆
+            - ✅ 多账号管理（Bot Token / 用户API）
+            - ✅ 自由选择消息范围（起止ID）
+            - ✅ 24小时自动监听任务
+            - ✅ AI文案改写（支持OpenAI/DeepSeek/通义千问/智谱GLM/Kimi/自定义）
+            - ✅ 内容类型过滤
+            - ✅ 转发记录和运行日志
+
+            ### 安装说明
+            1. 下载 `ChannelCloner-Windows-x64.zip`
+            2. 解压到任意目录
+            3. 运行 `channel_cloner.exe`
+          files: ChannelCloner-Windows-x64.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

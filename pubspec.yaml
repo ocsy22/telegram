@@ -1,0 +1,30 @@
+name: channel_cloner
+description: Telegram频道克隆工具 - 自动搬运、无引用转发、AI改写
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  provider: 6.1.5+1
+  shared_preferences: 2.5.3
+  http: 1.5.0
+  uuid: 4.5.1
+  path: 1.9.1
+  path_provider: 2.1.5
+  file_picker: 8.1.7
+  url_launcher: 6.3.1
+  intl: 0.20.2
+  hive: 2.2.3
+  hive_flutter: 1.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: 5.0.0
+
+flutter:
+  uses-material-design: true
