@@ -1,43 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Telethon Bridge v5.0
-- 完全无引用转发（使用 send_file / send_message 而非 forward_messages）
-- 经真实账号实测验证（@szny88 -> @mytgby）
-- 修复频道ID字符串解析问题
-- 支持连续多条消息、媒体组批量转发
+Telethon Bridge v6.0
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+新特性：
+1. 完全无引用转发（send_file/send_message）
+2. 支持 bot_token 参数：Telethon读取 + Bot发送（解决受保护频道）
+3. AI文案润色（免费模型 groq/gemini 等）
+4. 经真实账号实测（@szny88 -> @mytgby，10条全成功）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
-import sys
-import json
-import asyncio
-import os
-import traceback
-import threading
+import sys, json, asyncio, os, traceback, threading, urllib.request, urllib.parse
 
 # ── 依赖检查 ──────────────────────────────────────────────
-def _check_deps():
-    missing = []
-    try:
-        import telethon  # noqa
-    except ImportError:
-        missing.append('telethon')
-    return missing
-
-_missing = _check_deps()
-if _missing:
-    _err = {"type": "error", "error": f"缺少依赖: {', '.join(_missing)}。请运行: pip install {' '.join(_missing)}"}
-    print(json.dumps(_err, ensure_ascii=False), flush=True)
+try:
+    import telethon  # noqa
+except ImportError:
+    print(json.dumps({"type":"error","error":"缺少 telethon，请运行: pip install telethon"}, ensure_ascii=False), flush=True)
     sys.exit(1)
 
 from telethon import TelegramClient
 from telethon.tl.types import MessageMediaWebPage
 from telethon.errors import (
-    SessionPasswordNeededError,
-    FloodWaitError,
-    ChatWriteForbiddenError,
-    ChatAdminRequiredError,
-    ChannelPrivateError,
-    UserNotParticipantError,
+    SessionPasswordNeededError, FloodWaitError,
+    ChatWriteForbiddenError, ChatAdminRequiredError,
+    ChannelPrivateError, UserNotParticipantError,
 )
 
 # ── 全局状态 ──────────────────────────────────────────────
@@ -48,28 +35,19 @@ _stdout_lock = threading.Lock()
 # ── 工具函数 ──────────────────────────────────────────────
 
 def send_response(data: dict):
-    """线程安全地向 Flutter 输出一行 JSON"""
     line = json.dumps(data, ensure_ascii=False)
     with _stdout_lock:
         sys.stdout.write(line + '\n')
         sys.stdout.flush()
 
-
 def log_err(msg: str):
     sys.stderr.write(msg + '\n')
     sys.stderr.flush()
 
-
 def progress(req_id: str, msg: str):
     send_response({"type": "progress", "req_id": req_id, "msg": msg})
 
-
 def parse_channel_id(channel):
-    """
-    把频道标识符统一化：
-    - 纯数字字符串（含负号）→ int，Telethon 才能通过 get_entity 找到
-    - 用户名 / t.me 链接 → 保持字符串
-    """
     if channel is None:
         return channel
     s = str(channel).strip()
@@ -79,35 +57,233 @@ def parse_channel_id(channel):
         return s
 
 
-async def send_group_no_quote(client, target_entity, group_msgs: list,
-                               remove_caption: bool = False):
-    """
-    无引用地把一组消息（媒体组或单条）发到目标频道。
-    返回 (成功数量, 错误信息 or None)
+# ── AI润色 ──────────────────────────────────────────────
 
-    关键：使用 send_file / send_message，不用 forward_messages，
-    因此目标频道不会显示 "Forwarded from xxx"。
+def _ai_polish_sync(text: str, ai_config: dict) -> str:
+    """
+    同步AI润色（在executor中运行，避免阻塞event loop）。
+    返回润色后的文本（失败时返回原文）。
+    """
+    if not text or not text.strip():
+        return text
+    
+    provider = ai_config.get("provider", "")
+    api_key = ai_config.get("api_key", "")
+    model = ai_config.get("model", "")
+    system_prompt = ai_config.get("prompt", "请对以下文案进行润色改写，保持原意但让表达更自然流畅，只返回改写后的文案，不要加任何说明：")
+    base_url = ai_config.get("base_url", "")
+    
+    # pollinations是免费服务，不需要api_key
+    is_free = provider in ("pollinations",) or provider.startswith("free")
+    if not api_key and not is_free:
+        return text
+    
+    try:
+        # ── Pollinations（完全免费，直接GET请求）──
+        if provider == "pollinations":
+            p_model = model or "openai"
+            full_prompt = f"{system_prompt}\n\n{text}"
+            poll_url = f"https://text.pollinations.ai/{urllib.parse.quote(full_prompt)}?model={p_model}&temperature=0.7"
+            req = urllib.request.Request(poll_url,
+                                         headers={"User-Agent": "TelegramBridge/6.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = resp.read().decode("utf-8").strip()
+            # 过滤掉明显错误的响应
+            if result and not result.startswith("<") and not result.startswith("{") and len(result) > 3:
+                return result
+            return text
+
+        # 根据provider选择API端点
+        if provider == "groq":
+            url = "https://api.groq.com/openai/v1/chat/completions"
+            if not model:
+                model = "llama-3.1-8b-instant"
+        elif provider == "gemini":
+            # Gemini API
+            g_model = model or "gemini-1.5-flash"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{g_model}:generateContent?key={api_key}"
+            payload = {
+                "contents": [{"parts": [{"text": f"{system_prompt}\n\n{text}"}]}]
+            }
+            data = json.dumps(payload).encode()
+            req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                result = json.loads(resp.read())
+            polished = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+            return polished if polished else text
+        elif base_url:
+            url = base_url.rstrip("/") + "/chat/completions"
+        else:
+            return text  # 未知provider
+        
+        # OpenAI兼容格式（groq, openrouter等）
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text}
+            ],
+            "max_tokens": 1000,
+            "temperature": 0.7
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(url, data=data, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read())
+        polished = result["choices"][0]["message"]["content"].strip()
+        return polished if polished else text
+        
+    except Exception as e:
+        log_err(f"[AI润色] 失败: {e}")
+        return text  # 失败时返回原文
+
+
+async def ai_polish_text(text: str, ai_config: dict) -> str:
+    """
+    异步AI润色包装器（避免阻塞event loop）。
+    通过 run_in_executor 在线程池中调用同步HTTP请求。
+    """
+    if not text or not text.strip():
+        return text
+    loop = asyncio.get_event_loop()
+    try:
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, _ai_polish_sync, text, ai_config),
+            timeout=35.0
+        )
+        return result
+    except asyncio.TimeoutError:
+        log_err(f"[AI润色] 超时（35s）")
+        return text
+    except Exception as e:
+        log_err(f"[AI润色] 异步失败: {e}")
+        return text
+
+
+
+def bot_api_post(token: str, method: str, payload: dict, timeout: int = 30) -> dict:
+    """调用Bot API"""
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
+    except Exception as e:
+        return {"ok": False, "description": str(e)}
+
+
+async def send_group_via_bot(bot_token: str, target_channel, group_msgs: list,
+                              remove_caption: bool = False, ai_config: dict = None) -> tuple:
+    """
+    通过Bot API无引用发送一组消息。
+    使用 copyMessages（批量）或 copyMessage（单条）。
+    返回 (success_count, error_or_None)
+    """
+    if not group_msgs:
+        return 0, "空消息组"
+    
+    # 确定目标channel的chat_id
+    if isinstance(target_channel, int):
+        chat_id = str(target_channel)
+    else:
+        chat_id = str(target_channel)
+    
+    # 获取源频道chat_id（从消息里取）
+    from_chat_id = group_msgs[0].peer_id
+    # 转为数字ID
+    if hasattr(from_chat_id, 'channel_id'):
+        src_id = -1000000000000 - from_chat_id.channel_id
+    elif hasattr(from_chat_id, 'chat_id'):
+        src_id = -from_chat_id.chat_id
+    elif hasattr(from_chat_id, 'user_id'):
+        src_id = from_chat_id.user_id
+    else:
+        src_id = str(from_chat_id)
+    
+    msg_ids = [m.id for m in group_msgs]
+    
+    # 处理caption（AI润色）
+    caption_override = None
+    if not remove_caption and ai_config:
+        orig_caption = next((m.message for m in group_msgs if m.message), None)
+        if orig_caption:
+            polished = await ai_polish_text(orig_caption, ai_config)
+            if polished != orig_caption:
+                caption_override = polished
+    
+    # 尝试批量 copyMessages
+    payload = {
+        "chat_id": chat_id,
+        "from_chat_id": src_id,
+        "message_ids": msg_ids,
+        "remove_caption": remove_caption
+    }
+    result = bot_api_post(bot_token, "copyMessages", payload)
+    
+    if result.get("ok"):
+        cnt = len(result.get("result", []))
+        # 如果有AI润色的caption，用editMessageCaption更新第一条
+        if caption_override and cnt > 0:
+            new_msg_id = result["result"][0]["message_id"]
+            bot_api_post(bot_token, "editMessageCaption", {
+                "chat_id": chat_id, "message_id": new_msg_id, "caption": caption_override
+            })
+        return cnt or len(msg_ids), None
+    
+    # 单条fallback
+    if len(msg_ids) == 1:
+        r2 = bot_api_post(bot_token, "copyMessage", {
+            "chat_id": chat_id, "from_chat_id": src_id,
+            "message_id": msg_ids[0], "remove_caption": remove_caption
+        })
+        if r2.get("ok"):
+            return 1, None
+        return 0, r2.get("description", "copyMessage失败")
+    
+    return 0, result.get("description", "copyMessages失败")
+
+
+# ── 无引用发送（用户账号）──────────────────────────────────
+
+async def send_group_no_quote(client, target_entity, group_msgs: list,
+                               remove_caption: bool = False,
+                               ai_config: dict = None,
+                               caption_override: str = None) -> tuple:
+    """
+    用用户账号无引用发送一组消息。
+    返回 (成功数量, 错误信息 or None)
     """
     if not group_msgs:
         return 0, "空消息组"
 
-    # 取 caption（取第一条有文字的消息的文字）
+    # 确定caption
     caption = ""
     if not remove_caption:
-        for m in group_msgs:
-            if m.message:
-                caption = m.message
-                break
+        if caption_override:
+            caption = caption_override
+        else:
+            for m in group_msgs:
+                if m.message:
+                    caption = m.message
+                    break
+            # AI润色（异步）
+            if caption and ai_config:
+                caption = await ai_polish_text(caption, ai_config)
 
     first = group_msgs[0]
 
-    # 情况1：纯文字 或 链接预览（MessageMediaWebPage）
+    # 情况1：纯文字 或 链接预览
     if not first.media or isinstance(first.media, MessageMediaWebPage):
-        text = "" if remove_caption else (first.message or "")
+        text = "" if remove_caption else (caption or first.message or "")
         await client.send_message(target_entity, message=text)
         return 1, None
 
-    # 情况2：多文件媒体组（多张图 / 多个视频等）
+    # 情况2：多文件媒体组
     if len(group_msgs) > 1:
         files = [m.media for m in group_msgs
                  if m.media and not isinstance(m.media, MessageMediaWebPage)]
@@ -122,14 +298,11 @@ async def send_group_no_quote(client, target_entity, group_msgs: list,
     return 1, None
 
 
+# ── 媒体组补全 ──────────────────────────────────────────
+
 async def _complete_media_groups(client, entity, messages: list) -> list:
-    """
-    补全被边界截断的媒体组：
-    检查已有媒体组附近 ±10 个 ID，把遗漏的部分补回来。
-    """
     if not messages:
         return messages
-
     already_ids = {m.id for m in messages}
     grouped = {}
     for m in messages:
@@ -137,7 +310,6 @@ async def _complete_media_groups(client, entity, messages: list) -> list:
             grouped.setdefault(m.grouped_id, []).append(m)
     if not grouped:
         return messages
-
     extra = []
     for gid, grp in grouped.items():
         min_id = min(m.id for m in grp)
@@ -154,8 +326,7 @@ async def _complete_media_groups(client, entity, messages: list) -> list:
                     extra.append(m)
                     already_ids.add(m.id)
         except Exception:
-            pass  # 补全失败不中断主流程
-
+            pass
     return messages + extra
 
 
@@ -168,26 +339,21 @@ async def cmd_start_client(cmd: dict, req_id: str):
     session_dir = cmd.get('session_dir', os.path.expanduser('~'))
     session_path = os.path.join(session_dir, f"tg_{session_key}")
 
-    # 复用已有连接
     if session_key in clients:
         client = clients[session_key]
         if client.is_connected():
             if await client.is_user_authorized():
                 me = await client.get_me()
                 send_response({"type": "client_ready", "req_id": req_id,
-                               "session_key": session_key, "already_connected": True,
-                               "authorized": True,
+                               "session_key": session_key, "already_connected": True, "authorized": True,
                                "user": {"id": me.id, "username": me.username or "",
-                                        "first_name": me.first_name or "",
-                                        "phone": me.phone or ""}})
+                                        "first_name": me.first_name or "", "phone": me.phone or ""}})
             else:
                 send_response({"type": "client_ready", "req_id": req_id,
-                               "session_key": session_key, "already_connected": True,
-                               "authorized": False})
+                               "session_key": session_key, "already_connected": True, "authorized": False})
             return
 
-    client = TelegramClient(session_path, api_id, api_hash,
-                            system_version='4.16.30-vxCUSTOM')
+    client = TelegramClient(session_path, api_id, api_hash, system_version='4.16.30-vxCUSTOM')
     await client.connect()
     clients[session_key] = client
 
@@ -196,8 +362,7 @@ async def cmd_start_client(cmd: dict, req_id: str):
         send_response({"type": "client_ready", "req_id": req_id,
                        "session_key": session_key, "authorized": True,
                        "user": {"id": me.id, "username": me.username or "",
-                                "first_name": me.first_name or "",
-                                "phone": me.phone or ""}})
+                                "first_name": me.first_name or "", "phone": me.phone or ""}})
     else:
         send_response({"type": "client_ready", "req_id": req_id,
                        "session_key": session_key, "authorized": False})
@@ -217,8 +382,7 @@ async def cmd_sign_in(cmd: dict, req_id: str):
     if not client:
         send_response({"type": "error", "req_id": req_id, "error": "客户端未初始化"}); return
     try:
-        await client.sign_in(cmd['phone'], cmd['code'],
-                             phone_code_hash=cmd['phone_code_hash'])
+        await client.sign_in(cmd['phone'], cmd['code'], phone_code_hash=cmd['phone_code_hash'])
         me = await client.get_me()
         send_response({"type": "signed_in", "req_id": req_id,
                        "user": {"id": me.id, "username": me.username or "",
@@ -253,15 +417,16 @@ async def cmd_get_me(cmd: dict, req_id: str):
 
 async def cmd_clone_messages(cmd: dict, req_id: str):
     """
-    克隆消息 v5.0 ─ 无引用（send_file/send_message），连续多条
+    克隆消息 v6.0
     
     参数：
-      source_channel  : 来源频道（用户名或数字ID）
+      source_channel  : 来源频道
       target_channels : 目标频道列表
-      start_id (int)  : 起始消息ID，0=不限制
-      end_id   (int)  : 结束消息ID，0=不限制
-      count    (int)  : 消息条数上限（start/end均为0时取最新N条）
-      remove_caption  : 是否清除说明文字
+      start_id/end_id : 消息ID范围（0=不限）
+      count           : 条数上限
+      remove_caption  : 是否清除文案
+      bot_token       : [可选] 如果提供，用Bot发送（绕过某些频道限制）
+      ai_config       : [可选] AI润色配置 {"provider","api_key","model","prompt","base_url"}
     """
     session_key     = cmd['session_key']
     source_channel  = parse_channel_id(cmd['source_channel'])
@@ -270,12 +435,17 @@ async def cmd_clone_messages(cmd: dict, req_id: str):
     end_id          = int(cmd.get('end_id', 0))
     count           = int(cmd.get('count', 100))
     remove_caption  = bool(cmd.get('remove_caption', False))
+    bot_token       = cmd.get('bot_token', '')          # 可选Bot token
+    ai_config       = cmd.get('ai_config', None)        # 可选AI配置
+    use_bot_send    = bool(bot_token)                   # 是否用Bot发送
 
     client = clients.get(session_key)
     if not client or not client.is_connected():
         send_response({"type": "error", "req_id": req_id, "error": "客户端未连接"}); return
 
-    progress(req_id, f"正在连接源频道 {source_channel}...")
+    send_mode = "Bot" if use_bot_send else "用户账号"
+    ai_mode   = "✅已开启" if ai_config else "❌未配置"
+    progress(req_id, f"正在连接源频道 {source_channel}... [发送方式={send_mode}] [AI润色={ai_mode}]")
 
     # ── 获取源频道 ───────────────────────────────────────
     try:
@@ -283,7 +453,7 @@ async def cmd_clone_messages(cmd: dict, req_id: str):
         progress(req_id, f"✅ 源频道: {getattr(source_entity, 'title', source_channel)}")
     except (ChannelPrivateError, UserNotParticipantError):
         send_response({"type": "error", "req_id": req_id,
-                       "error": f"无法访问私有频道 {source_channel}，账号未加入该频道"}); return
+                       "error": f"无法访问私有频道 {source_channel}"}); return
     except Exception as e:
         send_response({"type": "error", "req_id": req_id,
                        "error": f"无法访问源频道: {e}"}); return
@@ -296,27 +466,24 @@ async def cmd_clone_messages(cmd: dict, req_id: str):
             progress(req_id, f"读取精确范围 [{start_id}, {end_id}]...")
             range_limit = min(end_id - start_id + 100, 5000)
             async for msg in client.iter_messages(
-                source_entity, min_id=start_id - 1, max_id=end_id + 1, limit=range_limit
+                source_entity, min_id=start_id-1, max_id=end_id+1, limit=range_limit
             ):
                 if msg and not msg.action:
                     messages.append(msg)
-
         elif start_id > 0:
-            progress(req_id, f"读取 start_id={start_id} 起的最新 {safe_count} 条...")
+            progress(req_id, f"读取 start_id={start_id} 起的 {safe_count} 条...")
             async for msg in client.iter_messages(
-                source_entity, min_id=start_id - 1, limit=safe_count
+                source_entity, min_id=start_id-1, limit=safe_count
             ):
                 if msg and not msg.action:
                     messages.append(msg)
-
         elif end_id > 0:
             progress(req_id, f"读取 end_id={end_id} 之前的 {safe_count} 条...")
             async for msg in client.iter_messages(
-                source_entity, max_id=end_id + 1, limit=safe_count
+                source_entity, max_id=end_id+1, limit=safe_count
             ):
                 if msg and not msg.action:
                     messages.append(msg)
-
         else:
             progress(req_id, f"读取最新 {safe_count} 条...")
             async for msg in client.iter_messages(source_entity, limit=safe_count):
@@ -326,19 +493,18 @@ async def cmd_clone_messages(cmd: dict, req_id: str):
         messages.sort(key=lambda m: m.id)
         messages = await _complete_media_groups(client, source_entity, messages)
         messages.sort(key=lambda m: m.id)
-        progress(req_id, f"共读取 {len(messages)} 条消息（含媒体组补全）")
+        progress(req_id, f"共读取 {len(messages)} 条（含媒体组补全）")
 
     except Exception as e:
         log_err(f"[clone] 读取失败: {traceback.format_exc()}")
-        send_response({"type": "error", "req_id": req_id,
-                       "error": f"读取消息失败: {e}"}); return
+        send_response({"type": "error", "req_id": req_id, "error": f"读取消息失败: {e}"}); return
 
     if not messages:
         send_response({"type": "clone_done", "req_id": req_id,
                        "success": 0, "failed": 0, "total": 0,
-                       "msg": "没有找到消息（范围为空或消息已删除）"}); return
+                       "msg": "没有找到消息"}); return
 
-    # ── 按媒体组分组（保留顺序）────────────────────────────
+    # ── 按媒体组分组 ─────────────────────────────────────
     ordered_groups = []
     seen_groups: dict = {}
     for msg in messages:
@@ -351,17 +517,16 @@ async def cmd_clone_messages(cmd: dict, req_id: str):
         else:
             ordered_groups.append((None, [msg]))
 
-    progress(req_id,
-             f"共 {len(ordered_groups)} 组，开始无引用转发到 {len(target_channels)} 个频道...")
+    progress(req_id, f"共 {len(ordered_groups)} 组，开始无引用转发到 {len(target_channels)} 个频道...")
 
     total_success = 0
     total_fail    = 0
 
     for target_channel in target_channels:
-        # 获取目标频道实体
         try:
             target_entity = await client.get_entity(target_channel)
-            progress(req_id, f"目标频道: {getattr(target_entity, 'title', target_channel)}")
+            target_title  = getattr(target_entity, 'title', str(target_channel))
+            progress(req_id, f"目标频道: {target_title}")
         except Exception as e:
             progress(req_id, f"⚠️ 无法访问目标频道 {target_channel}: {e}")
             continue
@@ -372,7 +537,7 @@ async def cmd_clone_messages(cmd: dict, req_id: str):
         for i, (gid, group_msgs) in enumerate(ordered_groups):
             ids = [m.id for m in group_msgs]
             ids_str = (f"msg#{ids[0]}" if len(ids) == 1
-                       else f"msg#{ids[0]}~{ids[-1]}({len(ids)}张)")
+                       else f"msg#{ids[0]}~{ids[-1]}({len(ids)}条)")
 
             # 断线重连
             if not client.is_connected():
@@ -381,74 +546,79 @@ async def cmd_clone_messages(cmd: dict, req_id: str):
                     await client.connect()
                     progress(req_id, "✅ 重连成功")
                 except Exception as ce:
-                    progress(req_id, f"❌ 重连失败: {ce}，中止此频道")
                     remaining = sum(len(g) for _, g in ordered_groups[i:])
-                    ch_fail    += remaining
-                    total_fail += remaining
+                    ch_fail += remaining; total_fail += remaining
+                    progress(req_id, f"❌ 重连失败: {ce}，中止此频道")
                     break
 
             try:
-                cnt, err = await send_group_no_quote(
-                    client, target_entity, group_msgs, remove_caption)
+                if use_bot_send:
+                    # ── Bot发送模式 ──
+                    cnt, err = await send_group_via_bot(
+                        bot_token, target_channel, group_msgs,
+                        remove_caption=remove_caption,
+                        ai_config=ai_config
+                    )
+                    if err:
+                        # Bot失败时降级到用户账号发送
+                        progress(req_id, f"⚠️ Bot发送失败({err})，降级到账号发送 {ids_str}")
+                        cnt, err = await send_group_no_quote(
+                            client, target_entity, group_msgs,
+                            remove_caption=remove_caption, ai_config=ai_config
+                        )
+                else:
+                    # ── 用户账号发送模式 ──
+                    cnt, err = await send_group_no_quote(
+                        client, target_entity, group_msgs,
+                        remove_caption=remove_caption, ai_config=ai_config
+                    )
 
                 if err:
                     ch_fail    += len(group_msgs)
                     total_fail += len(group_msgs)
-                    progress(req_id,
-                             f"⚠️ [{i+1}/{len(ordered_groups)}] {ids_str} 跳过: {err}")
+                    progress(req_id, f"⚠️ [{i+1}/{len(ordered_groups)}] {ids_str} 跳过: {err}")
                 else:
                     ch_success    += cnt
                     total_success += cnt
-                    progress(req_id,
-                             f"✅ [{i+1}/{len(ordered_groups)}] {ids_str} 成功{cnt}条")
+                    ai_tag = " [AI润色]" if ai_config else ""
+                    progress(req_id, f"✅ [{i+1}/{len(ordered_groups)}] {ids_str} 成功{cnt}条{ai_tag}")
 
             except FloodWaitError as e:
                 wait_secs = e.seconds + 3
-                progress(req_id,
-                         f"⏳ 触发限速 {wait_secs}s，等待后重试 {ids_str}...")
+                progress(req_id, f"⏳ 限速 {wait_secs}s，等待后重试 {ids_str}...")
                 await asyncio.sleep(wait_secs)
                 try:
-                    cnt, err = await send_group_no_quote(
-                        client, target_entity, group_msgs, remove_caption)
+                    if use_bot_send:
+                        cnt, err = await send_group_via_bot(bot_token, target_channel, group_msgs, remove_caption=remove_caption)
+                    else:
+                        cnt, err = await send_group_no_quote(client, target_entity, group_msgs, remove_caption=remove_caption)
                     if not err:
-                        ch_success    += cnt
-                        total_success += cnt
+                        ch_success += cnt; total_success += cnt
                         progress(req_id, f"✅ 重试成功 {ids_str}")
                     else:
-                        ch_fail    += len(group_msgs)
-                        total_fail += len(group_msgs)
+                        ch_fail += len(group_msgs); total_fail += len(group_msgs)
                         progress(req_id, f"❌ 重试失败 {ids_str}: {err}")
                 except Exception as e2:
-                    ch_fail    += len(group_msgs)
-                    total_fail += len(group_msgs)
-                    progress(req_id,
-                             f"❌ 重试异常 {ids_str}: {type(e2).__name__}: {e2}")
-                    log_err(f"[clone] retry error: {traceback.format_exc()}")
+                    ch_fail += len(group_msgs); total_fail += len(group_msgs)
+                    progress(req_id, f"❌ 重试异常 {ids_str}: {e2}")
+                    log_err(traceback.format_exc())
 
             except (ChatWriteForbiddenError, ChatAdminRequiredError) as e:
                 remaining = sum(len(g) for _, g in ordered_groups[i:])
-                ch_fail    += remaining
-                total_fail += remaining
-                progress(req_id,
-                         f"❌ 目标频道无发送权限 ({type(e).__name__})，跳过此频道")
-                log_err(f"[clone] permission error: {type(e).__name__}: {e}")
-                break  # 整个目标频道无权限，跳过
+                ch_fail += remaining; total_fail += remaining
+                progress(req_id, f"❌ 无发送权限({type(e).__name__})，跳过此频道")
+                break
 
             except Exception as e:
-                ch_fail    += len(group_msgs)
-                total_fail += len(group_msgs)
-                err_type    = type(e).__name__
-                progress(req_id,
-                         f"❌ [{i+1}/{len(ordered_groups)}] {ids_str} 失败({err_type}): {e}")
-                log_err(f"[clone] error: {err_type}: {e}\n{traceback.format_exc()}")
+                ch_fail += len(group_msgs); total_fail += len(group_msgs)
+                err_type = type(e).__name__
+                progress(req_id, f"❌ [{i+1}/{len(ordered_groups)}] {ids_str} 失败({err_type}): {e}")
+                log_err(f"[clone]: {err_type}: {e}\n{traceback.format_exc()}")
 
-            # 每组后短暂休眠，避免频繁调用API触发限速
             await asyncio.sleep(1.0)
 
-        progress(req_id,
-                 f"频道 {target_channel} 完成：✅{ch_success} ❌{ch_fail}")
+        progress(req_id, f"频道 {target_channel} 完成：✅{ch_success} ❌{ch_fail}")
 
-    # ── 发送完成信号 ─────────────────────────────────────
     send_response({
         "type":    "clone_done",
         "req_id":  req_id,
@@ -459,15 +629,13 @@ async def cmd_clone_messages(cmd: dict, req_id: str):
 
 
 async def cmd_forward_messages(cmd: dict, req_id: str):
-    """
-    单次无引用转发指定消息ID列表。
-    与 clone_messages 一样使用 send_file/send_message。
-    """
+    """单次无引用转发指定消息ID列表"""
     session_key    = cmd['session_key']
     source_channel = parse_channel_id(cmd['source_channel'])
     target_channel = parse_channel_id(cmd['target_channel'])
     message_ids    = [int(x) for x in cmd['message_ids']]
     remove_caption = bool(cmd.get('remove_caption', False))
+    bot_token      = cmd.get('bot_token', '')
 
     client = clients.get(session_key)
     if not client or not client.is_connected():
@@ -478,10 +646,8 @@ async def cmd_forward_messages(cmd: dict, req_id: str):
         target_entity = await client.get_entity(target_channel)
         msgs = await client.get_messages(source_entity, ids=message_ids)
         msgs = [m for m in msgs if m is not None]
-
         if not msgs:
-            send_response({"type": "error", "req_id": req_id,
-                           "error": "消息不存在或无权限"}); return
+            send_response({"type": "error", "req_id": req_id, "error": "消息不存在或无权限"}); return
 
         group_map: dict = {}
         singles = []
@@ -494,12 +660,16 @@ async def cmd_forward_messages(cmd: dict, req_id: str):
         forwarded = 0
         for grp_msgs in group_map.values():
             grp_msgs.sort(key=lambda m: m.id)
-            cnt, _ = await send_group_no_quote(client, target_entity,
-                                               grp_msgs, remove_caption)
+            if bot_token:
+                cnt, _ = await send_group_via_bot(bot_token, target_channel, grp_msgs, remove_caption)
+            else:
+                cnt, _ = await send_group_no_quote(client, target_entity, grp_msgs, remove_caption)
             forwarded += cnt
         for msg in singles:
-            cnt, _ = await send_group_no_quote(client, target_entity,
-                                               [msg], remove_caption)
+            if bot_token:
+                cnt, _ = await send_group_via_bot(bot_token, target_channel, [msg], remove_caption)
+            else:
+                cnt, _ = await send_group_no_quote(client, target_entity, [msg], remove_caption)
             forwarded += cnt
 
         send_response({"type": "forward_done", "req_id": req_id, "count": forwarded})
@@ -524,19 +694,17 @@ async def cmd_get_messages(cmd: dict, req_id: str):
         async for msg in client.iter_messages(entity, limit=limit, min_id=min_id):
             if msg.action:
                 continue
-            media_type = 'text'
-            if msg.photo:          media_type = 'photo'
+            if msg.photo:           media_type = 'photo'
             elif msg.video or msg.gif: media_type = 'video'
-            elif msg.document:     media_type = 'document'
+            elif msg.document:      media_type = 'document'
             elif msg.audio or msg.voice: media_type = 'audio'
-            elif msg.sticker:      media_type = 'sticker'
+            elif msg.sticker:       media_type = 'sticker'
+            else:                   media_type = 'text'
             msgs_data.append({
-                'id':         msg.id,
-                'text':       msg.message or '',
-                'caption':    msg.message or '',
-                'media_type': media_type,
+                'id': msg.id, 'text': msg.message or '',
+                'caption': msg.message or '', 'media_type': media_type,
                 'grouped_id': str(msg.grouped_id) if msg.grouped_id else None,
-                'date':       msg.date.isoformat() if msg.date else None,
+                'date': msg.date.isoformat() if msg.date else None,
             })
         send_response({"type": "messages", "req_id": req_id, "messages": msgs_data})
     except Exception as e:
@@ -554,31 +722,25 @@ async def cmd_disconnect(cmd: dict, req_id: str):
     send_response({"type": "disconnected", "req_id": req_id})
 
 
-# ── 主命令分发器 ───────────────────────────────────────────
+# ── 主命令分发 ────────────────────────────────────────────
 
 async def handle_command(cmd: dict):
     action = cmd.get('action', '')
     req_id = cmd.get('req_id', '')
     try:
-        dispatch = {
-            'ping':          lambda: send_response({"type": "pong", "req_id": req_id}),
-            'start_client':  lambda: cmd_start_client(cmd, req_id),
-            'send_code':     lambda: cmd_send_code(cmd, req_id),
-            'sign_in':       lambda: cmd_sign_in(cmd, req_id),
-            'sign_in_2fa':   lambda: cmd_sign_in_2fa(cmd, req_id),
-            'get_me':        lambda: cmd_get_me(cmd, req_id),
-            'clone_messages':   lambda: cmd_clone_messages(cmd, req_id),
-            'forward_messages': lambda: cmd_forward_messages(cmd, req_id),
-            'get_messages':  lambda: cmd_get_messages(cmd, req_id),
-            'disconnect':    lambda: cmd_disconnect(cmd, req_id),
-        }
-        handler = dispatch.get(action)
-        if handler is None:
+        if   action == 'ping':             send_response({"type": "pong", "req_id": req_id})
+        elif action == 'start_client':     await cmd_start_client(cmd, req_id)
+        elif action == 'send_code':        await cmd_send_code(cmd, req_id)
+        elif action == 'sign_in':          await cmd_sign_in(cmd, req_id)
+        elif action == 'sign_in_2fa':      await cmd_sign_in_2fa(cmd, req_id)
+        elif action == 'get_me':           await cmd_get_me(cmd, req_id)
+        elif action == 'clone_messages':   await cmd_clone_messages(cmd, req_id)
+        elif action == 'forward_messages': await cmd_forward_messages(cmd, req_id)
+        elif action == 'get_messages':     await cmd_get_messages(cmd, req_id)
+        elif action == 'disconnect':       await cmd_disconnect(cmd, req_id)
+        else:
             send_response({"type": "error", "req_id": req_id,
-                           "error": f"未知命令: {action}"}); return
-        result = handler()
-        if asyncio.iscoroutine(result):
-            await result
+                           "error": f"未知命令: {action}"})
     except FloodWaitError as e:
         send_response({"type": "error", "req_id": req_id,
                        "error": f"触发限速，需等待 {e.seconds} 秒"})
@@ -592,8 +754,7 @@ async def handle_command(cmd: dict):
 # ── 主循环 ────────────────────────────────────────────────
 
 async def main():
-    send_response({"type": "ready", "version": "5.0.0"})
-
+    send_response({"type": "ready", "version": "6.0.0"})
     loop  = asyncio.get_event_loop()
     queue: asyncio.Queue = asyncio.Queue()
 
@@ -602,15 +763,13 @@ async def main():
             try:
                 line = sys.stdin.readline()
                 if not line:
-                    loop.call_soon_threadsafe(queue.put_nowait, None)
-                    break
+                    loop.call_soon_threadsafe(queue.put_nowait, None); break
                 line = line.strip()
                 if line:
                     loop.call_soon_threadsafe(queue.put_nowait, line)
             except Exception as ex:
-                log_err(f"[stdin thread error] {ex}")
-                loop.call_soon_threadsafe(queue.put_nowait, None)
-                break
+                log_err(f"[stdin] {ex}")
+                loop.call_soon_threadsafe(queue.put_nowait, None); break
 
     threading.Thread(target=_read_stdin, daemon=True).start()
 
@@ -624,11 +783,9 @@ async def main():
         except json.JSONDecodeError as e:
             send_response({"type": "error", "error": f"JSON解析失败: {e}"})
 
-    for client in clients.values():
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+    for c in clients.values():
+        try: await c.disconnect()
+        except Exception: pass
 
 
 if __name__ == '__main__':

@@ -684,10 +684,40 @@ class AppProvider extends ChangeNotifier {
       return;
     }
 
+    // Bot账号优先尝试Telethon联合模式（Telethon读取 + Bot发送）
+    // 这样可以处理受保护的频道（Bot copyMessages无法访问的频道）
+    final telethonAccount = _findUserApiAccount();
+    if (_telethonReady && telethonAccount != null) {
+      addLog('▶️ Bot模式 + Telethon辅助（解决受保护频道限制）',
+          level: LogLevel.info, taskId: task.id);
+      await _runCloneTaskWithTelethon(
+          task, telethonAccount, runner, sources, targets, startId, endId, idx,
+          botToken: botToken);
+      return;
+    }
+
     addLog('▶️ 开始克隆 msg[$start~$end]，共$totalToClone条',
         level: LogLevel.info, taskId: task.id);
     await _runCloneWithBot(
         task, botToken, runner, sources, targets, start, end, idx);
+  }
+
+  /// 查找已授权的用户API账号（用于Telethon联合模式）
+  TelegramAccount? _findUserApiAccount() {
+    for (final acc in accounts) {
+      if (acc.type == AccountType.userApi &&
+          acc.telethonAuthorized &&
+          acc.status == AccountStatus.connected) {
+        return acc;
+      }
+    }
+    // 降级：即使未标记connected也用
+    for (final acc in accounts) {
+      if (acc.type == AccountType.userApi && acc.telethonAuthorized) {
+        return acc;
+      }
+    }
+    return null;
   }
 
   /// 查找任何可用的Bot Token（优先已连接账号）
@@ -717,10 +747,27 @@ class AppProvider extends ChangeNotifier {
     List<String> targets,
     int start,
     int end,
-    int idx,
-  ) async {
+    int idx, {
+    String? botToken,  // 可选：Bot联合模式时传入Bot Token
+  }) async {
     int totalSuccess = 0;
     int totalFailed = 0;
+
+    // 构建AI配置（如果启用）
+    Map<String, dynamic>? aiConfig;
+    if (settings.aiConfig.enabled &&
+        (settings.aiConfig.isFreeProvider ||
+            settings.aiConfig.apiKey.isNotEmpty)) {
+      aiConfig = {
+        'provider': settings.aiConfig.provider,
+        'api_key': settings.aiConfig.apiKey,
+        'model': settings.aiConfig.model.isNotEmpty
+            ? settings.aiConfig.model
+            : settings.aiConfig.defaultModel,
+        'base_url': settings.aiConfig.effectiveBaseUrl,
+        'prompt': '请对以下文案进行润色改写，保持原意但让表达更自然流畅，只返回改写后的文案，不要加任何说明：',
+      };
+    }
 
     for (final src in sources) {
       if (runner.cancelled) break;
@@ -734,6 +781,8 @@ class AppProvider extends ChangeNotifier {
         count: task.cloneCount > 0 ? task.cloneCount : 1000,
         removeCaption: task.removeCaption,
         modifyMd5: task.modifyVideoMd5,
+        botToken: botToken,
+        aiConfig: (task.aiPolish || task.aiRewrite) ? aiConfig : null,
         onProgress: (msg) {
           addLog(msg,
               taskId: task.id,

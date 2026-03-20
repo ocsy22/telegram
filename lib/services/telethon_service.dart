@@ -242,6 +242,8 @@ class TelethonService {
     int count = 100,
     bool removeCaption = false,
     bool modifyMd5 = false,
+    String? botToken,                      // 可选：Bot联合模式
+    Map<String, dynamic>? aiConfig,        // 可选：AI润色配置
     void Function(String msg)? onProgress,
   }) async {
     if (!_ready || _process == null) {
@@ -249,7 +251,7 @@ class TelethonService {
     }
 
     final reqId = 'clone_${DateTime.now().millisecondsSinceEpoch}';
-    final cmd = {
+    final cmd = <String, dynamic>{
       'action': 'clone_messages',
       'req_id': reqId,
       'session_key': sessionKey,
@@ -261,6 +263,12 @@ class TelethonService {
       'remove_caption': removeCaption,
       'modify_md5': modifyMd5,
     };
+    if (botToken != null && botToken.isNotEmpty) {
+      cmd['bot_token'] = botToken;
+    }
+    if (aiConfig != null) {
+      cmd['ai_config'] = aiConfig;
+    }
 
     // 注册 completer 等待 clone_done/error
     final completer = Completer<Map<String, dynamic>>();
