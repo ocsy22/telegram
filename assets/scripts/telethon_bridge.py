@@ -56,6 +56,23 @@ def progress(req_id, msg):
     send_response({"type": "progress", "req_id": req_id, "msg": msg})
 
 
+def parse_channel_id(channel: str):
+    """
+    智能解析频道标识符：
+    - 纯数字字符串（如 "-1003647242040"）→ 转成整数，Telethon get_entity 才能识别
+    - 用户名（如 "@mychannel" 或 "mychannel"）→ 保持字符串
+    - t.me 链接 → 保持字符串
+    """
+    if not channel:
+        return channel
+    s = channel.strip()
+    # 如果是纯整数字符串（可以带负号），转换为 int
+    try:
+        return int(s)
+    except ValueError:
+        return s
+
+
 # ==================== 命令处理 ====================
 
 async def handle_command(cmd: dict):
@@ -188,8 +205,8 @@ async def cmd_get_me(cmd, req_id):
 async def cmd_clone_messages(cmd, req_id):
     """克隆消息主函数 v3.1 - 彻底修复转发逻辑"""
     session_key = cmd['session_key']
-    source_channel = cmd['source_channel']
-    target_channels = cmd['target_channels']
+    source_channel = parse_channel_id(cmd['source_channel'])
+    target_channels = [parse_channel_id(t) for t in cmd['target_channels']]
     start_id = int(cmd.get('start_id', 0))
     end_id = int(cmd.get('end_id', 0))
     count = int(cmd.get('count', 100))
@@ -429,8 +446,8 @@ async def _complete_media_groups(client, entity, messages: list) -> list:
 
 async def cmd_forward_messages(cmd, req_id):
     session_key = cmd['session_key']
-    source_channel = cmd['source_channel']
-    target_channel = cmd['target_channel']
+    source_channel = parse_channel_id(cmd['source_channel'])
+    target_channel = parse_channel_id(cmd['target_channel'])
     message_ids = [int(x) for x in cmd['message_ids']]
 
     client = clients.get(session_key)
@@ -478,7 +495,7 @@ async def cmd_forward_messages(cmd, req_id):
 
 async def cmd_get_messages(cmd, req_id):
     session_key = cmd['session_key']
-    channel = cmd['channel']
+    channel = parse_channel_id(cmd['channel'])
     limit = int(cmd.get('limit', 50))
     min_id = int(cmd.get('min_id', 0))
 
